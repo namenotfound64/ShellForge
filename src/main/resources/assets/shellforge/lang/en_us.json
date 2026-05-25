@@ -1,0 +1,22 @@
+{
+  "itemGroup.shellforge": "ShellForge",
+  "block.shellforge.shell_core": "Shell Core",
+  "block.shellforge.shell_block": "Shell Block",
+  "block.shellforge.face_marker": "Face Marker",
+  "block.shellforge.stress_interface": "Stress Interface",
+  "block.shellforge.redstone_interface": "Redstone Interface",
+  "block.shellforge.fluid_interface": "Fluid Interface",
+  "item.shellforge.shell_blueprint": "Shell Blueprint",
+  "command.shellforge.copy.success": "Shell definition created: %d blocks, %d endpoints. Template sublevel: %s",
+  "command.shellforge.copy.empty": "Selection contains no blocks to copy.",
+  "command.shellforge.copy.invalid_type": "Invalid endpoint type. Use: stress, redstone, or fluid.",
+  "command.shellforge.copy.output_hint": "Output position hint: %s",
+  "command.shellforge.copy.no_definition": "This blueprint has no shell definition.",
+  "command.shellforge.copy.placed": "Shell placed with %d bindings. Sublevel: %s",
+  "command.shellforge.debug.status": "Blueprint placement projection debug: %s",
+  "command.shellforge.debug.enabled": "Enabled: placing a shell blueprint logs positions and projects the sublevel above the shell.",
+  "command.shellforge.debug.disabled": "Disabled: new shell blueprint placements stay hidden in the remote sublevel plot.",
+  "command.shellforge.debug.placement.header": "Shell at %s | copy origin %s | size %s | sublevel %s | plot center %s",
+  "command.shellforge.debug.placement.endpoint": "[%s] %s %s | original %s -> sublevel %s",
+  "command.shellforge.debug.placement.block": "original %s -> sublevel %s | %s"
+}

@@ -1,0 +1,13 @@
+{
+    "required": true,
+    "package": "com.shellforge.mixin",
+    "compatibilityLevel": "JAVA_21",
+    "refmap": "shellforge.refmap.json",
+    "mixins": [
+        "KineticNetworkMixin",
+        "LevelMixin",
+        "RotationPropagatorMixin"
+    ],
+    "client": [],
+    "server": []
+}

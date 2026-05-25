@@ -1,0 +1,22 @@
+{
+  "itemGroup.shellforge": "集成传动",
+  "block.shellforge.shell_core": "外壳核心",
+  "block.shellforge.shell_block": "外壳方块",
+  "block.shellforge.face_marker": "面标记",
+  "block.shellforge.stress_interface": "应力接口",
+  "block.shellforge.redstone_interface": "红石接口",
+  "block.shellforge.fluid_interface": "流体接口",
+  "item.shellforge.shell_blueprint": "外壳蓝图",
+  "command.shellforge.copy.success": "已创建外壳定义：%d 个方块，%d 个端点。模板子关卡：%s",
+  "command.shellforge.copy.empty": "选区内没有可复制的方块。",
+  "command.shellforge.copy.invalid_type": "无效的端点类型。请使用：stress、redstone 或 fluid。",
+  "command.shellforge.copy.output_hint": "输出位置提示：%s",
+  "command.shellforge.copy.no_definition": "此蓝图没有外壳定义。",
+  "command.shellforge.copy.placed": "已放置外壳，绑定 %d 个。子关卡：%s",
+  "command.shellforge.debug.status": "蓝图放置投影调试：%s",
+  "command.shellforge.debug.enabled": "已启用：放置外壳蓝图时会记录位置并在壳上方投影子关卡。",
+  "command.shellforge.debug.disabled": "已禁用：新放置的外壳蓝图将隐藏在远程子关卡地块中。",
+  "command.shellforge.debug.placement.header": "外壳 %s | 复制原点 %s | 尺寸 %s | 子关卡 %s | 地块中心 %s",
+  "command.shellforge.debug.placement.endpoint": "[%s] %s %s | 原坐标 %s -> 子关卡 %s",
+  "command.shellforge.debug.placement.block": "原坐标 %s -> 子关卡 %s | %s"
+}

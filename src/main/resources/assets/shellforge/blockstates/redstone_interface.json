@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "facing=north": { "model": "shellforge:block/redstone_interface" },
+    "facing=south": { "model": "shellforge:block/redstone_interface", "y": 180 },
+    "facing=east": { "model": "shellforge:block/redstone_interface", "y": 90 },
+    "facing=west": { "model": "shellforge:block/redstone_interface", "y": 270 },
+    "facing=up": { "model": "shellforge:block/redstone_interface", "x": 270 },
+    "facing=down": { "model": "shellforge:block/redstone_interface", "x": 90 }
+  }
+}
