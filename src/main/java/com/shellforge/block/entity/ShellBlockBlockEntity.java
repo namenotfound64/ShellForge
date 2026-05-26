@@ -288,15 +288,16 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         if (!(level instanceof ServerLevel serverLevel) || instance == null) return;
         if (ShellManager.getSubLevel(serverLevel, instance.subLevelId()) == null) return;
 
-        for (ShellBinding binding : bindings) {
-            if (binding.type() == ShellEndpointType.REDSTONE) {
-                bridgeRedstoneBinding(serverLevel, binding);
-            }
-        }
-
+        // Resolve outbound levels before inbound so we do not read our own output back as input.
         for (Direction face : Direction.values()) {
             if (hasRedstoneOnFace(face)) {
                 aggregateRedstoneOutput(serverLevel, face);
+            }
+        }
+
+        for (ShellBinding binding : bindings) {
+            if (binding.type() == ShellEndpointType.REDSTONE) {
+                bridgeRedstoneBinding(serverLevel, binding);
             }
         }
     }
@@ -309,20 +310,23 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     private int readExternalRedstoneOnFace(ServerLevel serverLevel, Direction shellFace) {
         if (!hasRedstoneOnFace(shellFace)) return 0;
         BlockPos neighborPos = worldPosition.relative(shellFace);
-        return Math.max(
+        int neighborSignal = Math.max(
                 serverLevel.getSignal(neighborPos, shellFace),
                 serverLevel.getDirectSignal(neighborPos, shellFace)
         );
+        int ourOutput = redstoneOutputs.getOrDefault(shellFace, 0);
+        // Ignore levels at or below our own outbound signal to break external feedback loops.
+        return neighborSignal > ourOutput ? neighborSignal : 0;
     }
 
     private void bridgeRedstoneFace(Direction shellFace) {
         if (!(level instanceof ServerLevel serverLevel) || instance == null) return;
+        aggregateRedstoneOutput(serverLevel, shellFace);
         for (ShellBinding binding : bindingsByFace.getOrDefault(shellFace, List.of())) {
             if (binding.type() == ShellEndpointType.REDSTONE) {
                 bridgeRedstoneBinding(serverLevel, binding);
             }
         }
-        aggregateRedstoneOutput(serverLevel, shellFace);
     }
 
     private void bridgeRedstoneBinding(ServerLevel serverLevel, ShellBinding binding) {

@@ -61,7 +61,8 @@ public class RedstoneInterfaceBlockEntity extends BlockEntity {
                     neighborState.getSignal(serverLevel, neighborPos, direction),
                     neighborState.getDirectSignal(serverLevel, neighborPos, direction)
             );
-            if (signal > power) {
+            // Ignore neighbors powered only by this interface's inbound shell signal.
+            if (signal > externalPower && signal > power) {
                 power = signal;
             }
         }
