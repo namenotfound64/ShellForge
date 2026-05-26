@@ -8,6 +8,8 @@ import com.shellforge.shell.ShellBinding;
 import com.shellforge.shell.ShellEndpointType;
 import com.shellforge.shell.ShellInstance;
 import com.shellforge.shell.ShellManager;
+import com.shellforge.shell.ShellWirelessRedstoneBridge;
+import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import com.simibubi.create.content.kinetics.KineticNetwork;
 import com.simibubi.create.content.kinetics.base.GeneratingKineticBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
@@ -27,10 +29,13 @@ import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 
 /**
  * Shell block entity in the main world.
@@ -45,8 +50,11 @@ import java.util.UUID;
  */
 public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraFaceKinetics {
     private static final float EPSILON = 1e-4f;
+    private static final Set<ShellBlockBlockEntity> ACTIVE_SHELLS =
+            Collections.newSetFromMap(new WeakHashMap<>());
 
     private @Nullable ShellInstance instance;
+    private final ShellWirelessRedstoneBridge wirelessRedstoneBridge = new ShellWirelessRedstoneBridge();
     private final List<ShellBinding> bindings = new ArrayList<>();
     private final Map<Direction, List<ShellBinding>> bindingsByFace = new EnumMap<>(Direction.class);
     private final Map<Direction, Integer> redstoneOutputs = new EnumMap<>(Direction.class);
@@ -118,9 +126,20 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
     // ========== Instance management ==========
 
+    public static Set<ShellBlockBlockEntity> getActiveShells() {
+        return ACTIVE_SHELLS;
+    }
+
     public void setInstance(ShellInstance instance) {
         this.instance = instance;
         rebuildBindingIndex(instance.bindings());
+        ACTIVE_SHELLS.add(this);
+        if (level instanceof ServerLevel serverLevel) {
+            ServerSubLevel subLevel = ShellManager.getSubLevel(serverLevel, instance.subLevelId());
+            if (subLevel != null) {
+                wirelessRedstoneBridge.refreshInternalLinks(subLevel);
+            }
+        }
         setChanged();
         if (level != null && !level.isClientSide) {
             detachKinetics();
@@ -154,6 +173,8 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     }
 
     public void clearInstance() {
+        ACTIVE_SHELLS.remove(this);
+        wirelessRedstoneBridge.clear();
         instance = null;
         bindings.clear();
         bindingsByFace.clear();
@@ -235,6 +256,30 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                 bridgeRedstoneFace(face);
             }
         }
+    }
+
+    /**
+     * Relays Create wireless redstone across the shell boundary. Called at end of server tick so
+     * merged signal levels win over Create's per-world network pass.
+     */
+    public void bridgeWirelessRedstone() {
+        if (level == null || level.isClientSide || !(level instanceof ServerLevel serverLevel) || instance == null) {
+            return;
+        }
+        if (!wirelessRedstoneBridge.hasLinks()) {
+            return;
+        }
+        wirelessRedstoneBridge.bridge(serverLevel, worldPosition, collectRedstoneInterfacePositions());
+    }
+
+    private List<BlockPos> collectRedstoneInterfacePositions() {
+        List<BlockPos> positions = new ArrayList<>();
+        for (ShellBinding binding : bindings) {
+            if (binding.type() == ShellEndpointType.REDSTONE) {
+                positions.add(binding.internalInterfacePos());
+            }
+        }
+        return positions;
     }
 
     // ========== Redstone bridging ==========
@@ -403,6 +448,13 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                     List.copyOf(loadedBindings)
             );
             rebuildBindingIndex(loadedBindings);
+            ACTIVE_SHELLS.add(this);
+            if (level instanceof ServerLevel serverLevel) {
+                ServerSubLevel subLevel = ShellManager.getSubLevel(serverLevel, subLevelId);
+                if (subLevel != null) {
+                    wirelessRedstoneBridge.refreshInternalLinks(subLevel);
+                }
+            }
         } else {
             instance = null;
             bindings.clear();

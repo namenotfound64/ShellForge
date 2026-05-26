@@ -49,8 +49,11 @@ public final class ShellManager {
     private ShellManager() {
     }
 
-    /** Reserved for periodic shell maintenance; currently unused. */
+    /** Post-tick shell maintenance (wireless redstone relay runs after Create link networks update). */
     public static void serverTick(MinecraftServer server) {
+        for (ShellBlockBlockEntity shell : ShellBlockBlockEntity.getActiveShells()) {
+            shell.bridgeWirelessRedstone();
+        }
     }
 
     public static ShellDefinition createDefinition(
