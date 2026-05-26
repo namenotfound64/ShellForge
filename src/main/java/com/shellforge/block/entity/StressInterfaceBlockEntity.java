@@ -1,7 +1,11 @@
 package com.shellforge.block.entity;
 
+import com.shellforge.block.StressInterfaceBlock;
 import com.shellforge.registry.SFBlockEntities;
+import com.shellforge.shell.ShellKineticAngleSync;
 import com.simibubi.create.content.kinetics.base.GeneratingKineticBlockEntity;
+import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.kinetics.transmission.sequencer.SequencedGearshiftBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -21,6 +25,8 @@ public class StressInterfaceBlockEntity extends GeneratingKineticBlockEntity {
     private float externalSpeed;
     /** Stress capacity per RPM; Create scales this by {@link #getGeneratedSpeed()} for the internal network. */
     private float externalCapacity;
+    /** Absolute shaft angle mirrored from the external shell side. */
+    private float externalVisualAngle;
 
     public StressInterfaceBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
         super(type, pos, state);
@@ -69,12 +75,12 @@ public class StressInterfaceBlockEntity extends GeneratingKineticBlockEntity {
                     getOrCreateNetwork().updateNetwork();
                 }
             } else if (Math.abs(oldSpeed - speed) > EPSILON) {
-                if (hasNetwork())
-                    getOrCreateNetwork().remove(this);
-                detachKinetics();
-                removeSource();
                 reActivateSource = true;
                 setChanged();
+                if (hasNetwork()) {
+                    getOrCreateNetwork().updateCapacityFor(this, externalCapacity);
+                    getOrCreateNetwork().updateNetwork();
+                }
             } else if (hasNetwork() && Math.abs(oldCapacity - externalCapacity) > EPSILON) {
                 getOrCreateNetwork().updateCapacityFor(this, externalCapacity);
                 setChanged();
@@ -82,6 +88,54 @@ public class StressInterfaceBlockEntity extends GeneratingKineticBlockEntity {
                 setChanged();
             }
         }
+    }
+
+    public float getExternalSpeed() {
+        return externalSpeed;
+    }
+
+    public float getExternalCapacity() {
+        return externalCapacity;
+    }
+
+    public void setExternalVisualAngle(float angle) {
+        if (Math.abs(externalVisualAngle - angle) > EPSILON) {
+            externalVisualAngle = angle;
+            setChanged();
+        }
+    }
+
+    public float getExternalVisualAngle() {
+        return externalVisualAngle;
+    }
+
+    @Override
+    public int getRotationAngleOffset(Direction.Axis axis) {
+        if (sequenceContext != null) {
+            return 0;
+        }
+        BlockState state = getBlockState();
+        if (state.hasProperty(StressInterfaceBlock.FACING)
+                && state.getValue(StressInterfaceBlock.FACING).getAxis() == axis) {
+            return ShellKineticAngleSync.rotationOffsetForVisualAngle(this, axis, externalVisualAngle);
+        }
+        return 0;
+    }
+
+    @Override
+    protected void copySequenceContextFrom(KineticBlockEntity sourceBE) {
+        SequencedGearshiftBlockEntity.SequenceContext fromSource =
+                ShellKineticAngleSync.probeSequenceContext(sourceBE);
+        if (fromSource != null) {
+            sequenceContext = fromSource;
+            return;
+        }
+        super.copySequenceContextFrom(sourceBE);
+    }
+
+    @Override
+    protected boolean syncSequenceContext() {
+        return sequenceContext != null;
     }
 
     @Override
@@ -104,6 +158,7 @@ public class StressInterfaceBlockEntity extends GeneratingKineticBlockEntity {
         super.write(compound, registries, clientPacket);
         compound.putFloat("ExternalSpeed", externalSpeed);
         compound.putFloat("ExternalCapacity", externalCapacity);
+        compound.putFloat("ExternalVisualAngle", externalVisualAngle);
     }
 
     @Override
@@ -111,5 +166,10 @@ public class StressInterfaceBlockEntity extends GeneratingKineticBlockEntity {
         super.read(compound, registries, clientPacket);
         externalSpeed = compound.getFloat("ExternalSpeed");
         externalCapacity = compound.getFloat("ExternalCapacity");
+        if (compound.contains("ExternalVisualAngle")) {
+            externalVisualAngle = compound.getFloat("ExternalVisualAngle");
+        } else {
+            externalVisualAngle = compound.getInt("ExternalAngleOffset");
+        }
     }
 }

@@ -4,6 +4,8 @@
     "compatibilityLevel": "JAVA_21",
     "refmap": "shellforge.refmap.json",
     "mixins": [
+        "KineticBlockEntityMixin",
+        "MechanicalBearingBlockEntityMixin",
         "KineticNetworkMixin",
         "LevelMixin",
         "RotationPropagatorMixin"

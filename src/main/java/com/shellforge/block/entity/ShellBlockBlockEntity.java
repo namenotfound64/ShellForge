@@ -7,12 +7,14 @@ import com.shellforge.shell.CombinedFluidHandler;
 import com.shellforge.shell.ShellBinding;
 import com.shellforge.shell.ShellEndpointType;
 import com.shellforge.shell.ShellInstance;
+import com.shellforge.shell.ShellKineticAngleSync;
 import com.shellforge.shell.ShellManager;
 import com.shellforge.shell.ShellWirelessRedstoneBridge;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import com.simibubi.create.content.kinetics.KineticNetwork;
 import com.simibubi.create.content.kinetics.base.GeneratingKineticBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.kinetics.transmission.sequencer.SequencedGearshiftBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -416,6 +418,16 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             outputs.add(tag);
         });
         compound.put("RedstoneOutputs", outputs);
+        if (clientPacket) {
+            ListTag hubAngles = new ListTag();
+            for (Map.Entry<Direction, PerFaceStressHub> entry : stressHubs.entrySet()) {
+                CompoundTag tag = new CompoundTag();
+                tag.putString("face", entry.getKey().getName());
+                tag.putFloat("visualAngle", entry.getValue().bridgedVisualAngle);
+                hubAngles.add(tag);
+            }
+            compound.put("StressHubAngles", hubAngles);
+        }
     }
 
     private BlockPos resolveStructureWorldOrigin(CompoundTag compound, UUID subLevelId) {
@@ -470,6 +482,22 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             CompoundTag tag = outputs.getCompound(i);
             redstoneOutputs.put(Direction.byName(tag.getString("face")), tag.getInt("power"));
         }
+        if (clientPacket && compound.contains("StressHubAngles")) {
+            ListTag hubAngles = compound.getList("StressHubAngles", Tag.TAG_COMPOUND);
+            for (int i = 0; i < hubAngles.size(); i++) {
+                CompoundTag tag = hubAngles.getCompound(i);
+                Direction face = Direction.byName(tag.getString("face"));
+                if (face != null && hasStressFace(face)) {
+                    PerFaceStressHub hub = stressHubs.get(face);
+                    if (hub == null) {
+                        hub = (PerFaceStressHub) getStressHub(face);
+                    }
+                    if (hub != null) {
+                        hub.applySyncedVisualAngle(tag.getFloat("visualAngle"));
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -484,6 +512,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         private float bridgedSpeed;
         private float bridgedStress;
         private float bridgedCapacity;
+        private float bridgedVisualAngle;
 
         public PerFaceStressHub(BlockEntityType<?> type, BlockPos pos, BlockState state,
                                 ShellBlockBlockEntity parent, Direction face) {
@@ -548,13 +577,20 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
             if (speedAbs < EPSILON) {
                 si.setExternalSpeed(0, 0);
+                si.setExternalVisualAngle(0);
                 clearImportState();
                 return;
             }
 
             float availableCapacity = Math.max(0, capacity - stress + bridgedStress);
             float capacityPerRpm = availableCapacity / speedAbs;
-            si.setExternalSpeed(externalSpeed, capacityPerRpm);
+            boolean internalSequence = ShellKineticAngleSync.hasActiveTurnSequence(si);
+            boolean speedUnchanged = !ShellKineticAngleSync.rpmChanged(si.getExternalSpeed(), externalSpeed)
+                    && Math.abs(si.getExternalCapacity() - capacityPerRpm) < EPSILON;
+            if (!internalSequence || !speedUnchanged) {
+                si.setExternalSpeed(externalSpeed, capacityPerRpm);
+            }
+            syncInboundRotation(serverLevel, si, externalSpeed);
 
             float netStress = 0;
             KineticNetwork internalNetwork = null;
@@ -587,11 +623,15 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
             if (speedAbs < EPSILON) {
                 clearExportState();
+                bridgedVisualAngle = 0;
+                sequenceContext = null;
                 return;
             }
 
             if (!si.hasNetwork()) {
                 clearExportState();
+                bridgedVisualAngle = 0;
+                sequenceContext = null;
                 return;
             }
 
@@ -609,25 +649,91 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             int exportSharers = parent.countExportingHubsOnNetwork(serverLevel, internalNetwork);
             float newCapacity = Math.max(0, remaining / exportSharers);
 
+            ShellKineticAngleSync.SpringSequenceState springSequence =
+                    ShellKineticAngleSync.findActiveSpringSequence(si);
+
             float oldCapacity = bridgedCapacity;
             float oldSpeed = bridgedSpeed;
-            bridgedSpeed = internalSpeed;
+            float exportSpeed = springSequence != null ? springSequence.rpm() : internalSpeed;
+            bridgedSpeed = exportSpeed;
             bridgedCapacity = newCapacity;
             bridgedStress = 0;
+            syncOutboundRotation(serverLevel, si, springSequence);
 
-            if (Math.abs(oldSpeed - bridgedSpeed) > EPSILON) {
-                if (hasNetwork()) {
-                    getOrCreateNetwork().remove(this);
+            boolean springTurn = springSequence != null;
+            if (ShellKineticAngleSync.rpmChanged(oldSpeed, bridgedSpeed)) {
+                if (springTurn) {
+                    reActivateSource = true;
+                    if (hasNetwork()) {
+                        getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
+                    }
+                } else {
+                    boolean fromOrToZero = (Math.abs(oldSpeed) < EPSILON) != (Math.abs(bridgedSpeed) < EPSILON);
+                    boolean signFlip = Math.abs(oldSpeed) > EPSILON && Math.abs(bridgedSpeed) > EPSILON
+                            && Math.signum(oldSpeed) != Math.signum(bridgedSpeed);
+                    if (fromOrToZero || signFlip) {
+                        if (hasNetwork()) {
+                            getOrCreateNetwork().remove(this);
+                        }
+                        detachKinetics();
+                        removeSource();
+                        reActivateSource = true;
+                    } else {
+                        reActivateSource = true;
+                        if (hasNetwork()) {
+                            getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
+                        }
+                    }
                 }
-                detachKinetics();
-                removeSource();
-                reActivateSource = true;
             } else if (Math.abs(oldCapacity - bridgedCapacity) > EPSILON) {
                 if (hasNetwork()) {
                     getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
                 }
             }
             setChanged();
+        }
+
+        private void syncInboundRotation(ServerLevel serverLevel, StressInterfaceBlockEntity si, float speed) {
+            // Do not overwrite internal spring/sequencer context with a null external hub context.
+            if (ShellKineticAngleSync.hasActiveTurnSequence(si)) {
+                return;
+            }
+            ShellKineticAngleSync.copySequenceContextIfPresent(this, si);
+            bridgedVisualAngle = 0;
+            si.setExternalVisualAngle(0);
+            parent.setChanged();
+            parent.sendData();
+            si.sendData();
+        }
+
+        private void syncOutboundRotation(
+                ServerLevel serverLevel,
+                StressInterfaceBlockEntity si,
+                @Nullable ShellKineticAngleSync.SpringSequenceState springSequence
+        ) {
+            SequencedGearshiftBlockEntity.SequenceContext incoming = springSequence != null
+                    ? springSequence.context()
+                    : ShellKineticAngleSync.findSequenceContextInChain(si);
+            boolean contextChanged = ShellKineticAngleSync.sequenceContextChanged(this.sequenceContext, incoming);
+            this.sequenceContext = incoming;
+            this.bridgedVisualAngle = 0;
+            if (contextChanged) {
+                if (incoming != null) {
+                    ShellKineticAngleSync.refreshDownstreamSequenceContext(this);
+                } else {
+                    ShellKineticAngleSync.clearDownstreamSequenceContext(this);
+                }
+            }
+            parent.setChanged();
+            parent.sendData();
+        }
+
+        void applySyncedVisualAngle(float visualAngle) {
+            bridgedVisualAngle = visualAngle;
+        }
+
+        public float getBridgedVisualAngle() {
+            return bridgedVisualAngle;
         }
 
         private void clearImportState() {
@@ -642,9 +748,15 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
         private void clearExportState() {
             if (Math.abs(bridgedSpeed) > EPSILON || Math.abs(bridgedCapacity) > EPSILON) {
+                boolean hadSequence = sequenceContext != null;
                 bridgedSpeed = 0;
                 bridgedCapacity = 0;
                 bridgedStress = 0;
+                bridgedVisualAngle = 0;
+                sequenceContext = null;
+                if (hadSequence) {
+                    ShellKineticAngleSync.clearDownstreamSequenceContext(this);
+                }
                 if (hasNetwork()) {
                     getOrCreateNetwork().remove(this);
                 }
@@ -659,6 +771,8 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             bridgedSpeed = 0;
             bridgedStress = 0;
             bridgedCapacity = 0;
+            bridgedVisualAngle = 0;
+            sequenceContext = null;
             if (hasNetwork())
                 getOrCreateNetwork().remove(this);
             detachKinetics();
@@ -714,6 +828,30 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                 return 1;
             }
             return super.propagateRotationTo(target, stateFrom, stateTo, diff, connectedViaAxes, connectedViaCogs);
+        }
+
+        @Override
+        public int getRotationAngleOffset(Direction.Axis axis) {
+            if (face.getAxis() != axis || sequenceContext != null) {
+                return 0;
+            }
+            return ShellKineticAngleSync.rotationOffsetForVisualAngle(this, axis, bridgedVisualAngle);
+        }
+
+        @Override
+        protected void copySequenceContextFrom(KineticBlockEntity sourceBE) {
+            SequencedGearshiftBlockEntity.SequenceContext fromSource =
+                    ShellKineticAngleSync.probeSequenceContext(sourceBE);
+            if (fromSource != null) {
+                sequenceContext = fromSource;
+                return;
+            }
+            super.copySequenceContextFrom(sourceBE);
+        }
+
+        @Override
+        protected boolean syncSequenceContext() {
+            return sequenceContext != null;
         }
 
         @Override
