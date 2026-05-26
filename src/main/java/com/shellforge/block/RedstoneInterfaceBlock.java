@@ -19,8 +19,7 @@ import org.jetbrains.annotations.Nullable;
 
 /**
  * Directional redstone port. {@link #FACING} points toward the bound {@code shell_block} face.
- * When externally powered through the shell, acts as a strongly powered block (like a lever-powered
- * solid). When strongly powered, emits signal 15 only on {@link #FACING} (observer-style output face).
+ * Relays analog redstone levels (0–15) between the shell exterior and the sublevel interior.
  */
 public class RedstoneInterfaceBlock extends Block implements EntityBlock {
     public static final DirectionProperty FACING = BlockStateProperties.FACING;
@@ -50,27 +49,20 @@ public class RedstoneInterfaceBlock extends Block implements EntityBlock {
         return true;
     }
 
-    /**
-     * Weakly power adjacent redstone in the sublevel when the shell injects power.
-     * This makes nearby dust/lamps behave like they are touching a lever-powered block.
-     */
     @Override
     public int getSignal(BlockState state, BlockGetter level, BlockPos pos, Direction direction) {
         BlockEntity blockEntity = level.getBlockEntity(pos);
-        if (blockEntity instanceof RedstoneInterfaceBlockEntity redstone && redstone.isStronglyPowered()) {
-            return 15;
+        if (blockEntity instanceof RedstoneInterfaceBlockEntity redstone) {
+            return redstone.getExternalPower();
         }
         return 0;
     }
 
-    /**
-     * Strong power into adjacent blocks in the sublevel (lever-powered opaque behavior).
-     */
     @Override
     public int getDirectSignal(BlockState state, BlockGetter level, BlockPos pos, Direction direction) {
         BlockEntity blockEntity = level.getBlockEntity(pos);
-        if (blockEntity instanceof RedstoneInterfaceBlockEntity redstone && redstone.isStronglyPowered()) {
-            return 15;
+        if (blockEntity instanceof RedstoneInterfaceBlockEntity redstone) {
+            return redstone.getExternalPower();
         }
         return 0;
     }

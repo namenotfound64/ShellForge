@@ -7,26 +7,27 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
 public class RedstoneInterfaceBlockEntity extends BlockEntity {
-    private boolean stronglyPowered;
+    private int externalPower;
 
     public RedstoneInterfaceBlockEntity(BlockPos pos, BlockState state) {
         super(SFBlockEntities.REDSTONE_INTERFACE.get(), pos, state);
     }
 
     /**
-     * Apply shell-face power. Any non-zero external level strongly powers this block in the sublevel.
+     * Apply shell-face power at the same analog level read from the external side (0–15).
      */
     public void applyExternalPower(int power, Direction shellFace) {
-        boolean shouldPower = power > 0;
-        if (shouldPower == stronglyPowered) {
+        int clamped = Mth.clamp(power, 0, 15);
+        if (clamped == externalPower) {
             return;
         }
-        stronglyPowered = shouldPower;
+        externalPower = clamped;
         setChanged();
         if (!(level instanceof ServerLevel serverLevel)) {
             return;
@@ -47,8 +48,8 @@ public class RedstoneInterfaceBlockEntity extends BlockEntity {
         notifyNeighbors(serverLevel, state);
     }
 
-    public boolean isStronglyPowered() {
-        return stronglyPowered;
+    public int getExternalPower() {
+        return externalPower;
     }
 
     public int getInternalOutputPower(ServerLevel serverLevel) {
@@ -77,12 +78,16 @@ public class RedstoneInterfaceBlockEntity extends BlockEntity {
     @Override
     protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
         super.saveAdditional(tag, registries);
-        tag.putBoolean("StronglyPowered", stronglyPowered);
+        tag.putInt("ExternalPower", externalPower);
     }
 
     @Override
     protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {
         super.loadAdditional(tag, registries);
-        stronglyPowered = tag.getBoolean("StronglyPowered");
+        if (tag.contains("ExternalPower")) {
+            externalPower = Mth.clamp(tag.getInt("ExternalPower"), 0, 15);
+        } else if (tag.getBoolean("StronglyPowered")) {
+            externalPower = 15;
+        }
     }
 }
