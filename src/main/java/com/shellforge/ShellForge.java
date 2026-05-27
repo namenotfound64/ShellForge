@@ -8,11 +8,13 @@ import com.shellforge.registry.SFCreativeTabs;
 import com.shellforge.registry.SFFluidCapabilities;
 import com.shellforge.registry.SFItems;
 import com.shellforge.shell.ShellManager;
+import dev.ryanhcode.sable.platform.SableEventPlatform;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
 
@@ -33,11 +35,17 @@ public final class ShellForge {
 
         modEventBus.addListener(SFFluidCapabilities::register);
         NeoForge.EVENT_BUS.register(this);
+        SableEventPlatform.INSTANCE.onSubLevelContainerReady(ShellManager::onSubLevelContainerReady);
     }
 
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         ShellForgeCommand.register(event.getDispatcher());
+    }
+
+    @SubscribeEvent
+    public void onServerStarted(ServerStartedEvent event) {
+        ShellManager.schedulePostLoadRebindSequence();
     }
 
     @SubscribeEvent

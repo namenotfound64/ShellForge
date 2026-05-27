@@ -3,12 +3,15 @@ package com.shellforge.shell;
 import com.shellforge.block.FaceMarkerBlock;
 import com.shellforge.block.RedstoneInterfaceBlock;
 import com.shellforge.block.StressInterfaceBlock;
+import com.shellforge.block.entity.StressInterfaceBlockEntity;
 import com.shellforge.block.entity.ShellBlockBlockEntity;
 import com.shellforge.registry.SFBlocks;
+import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.sublevel.storage.holding.SubLevelHoldingChunkMap;
 import dev.ryanhcode.sable.companion.math.BoundingBox3i;
 import dev.ryanhcode.sable.companion.math.BoundingBox3ic;
 import dev.ryanhcode.sable.companion.math.Pose3d;
@@ -26,9 +29,12 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Vector3d;
 
@@ -50,9 +56,104 @@ public final class ShellManager {
     }
 
     /** Post-tick shell maintenance (wireless redstone relay runs after Create link networks update). */
+    private static final java.util.List<Integer> deferredRebindSchedule = new java.util.ArrayList<>();
+
+    public static void scheduleDeferredRebind(int ticks) {
+        if (ticks <= 0) {
+            return;
+        }
+        deferredRebindSchedule.add(ticks);
+    }
+
+    public static void schedulePostLoadRebindSequence() {
+        scheduleDeferredRebind(20);
+        scheduleDeferredRebind(80);
+        scheduleDeferredRebind(160);
+    }
+
+    private static void requestAllShellRebinds(MinecraftServer server) {
+        for (ServerLevel level : server.getAllLevels()) {
+            for (ShellBlockBlockEntity shell : new java.util.ArrayList<>(ShellBlockBlockEntity.getActiveShells())) {
+                if (shell.getLevel() == level && shell.getInstance() != null) {
+                    shell.requestRebindAfterLoad();
+                    shell.tickServerMaintenance();
+                }
+            }
+        }
+    }
+
     public static void serverTick(MinecraftServer server) {
+        for (int i = deferredRebindSchedule.size() - 1; i >= 0; i--) {
+            int remaining = deferredRebindSchedule.get(i) - 1;
+            if (remaining <= 0) {
+                deferredRebindSchedule.remove(i);
+                requestAllShellRebinds(server);
+            } else {
+                deferredRebindSchedule.set(i, remaining);
+            }
+        }
         for (ShellBlockBlockEntity shell : ShellBlockBlockEntity.getActiveShells()) {
+            if (shell.isPendingAnchorSync()) {
+                shell.tickServerMaintenance();
+            }
             shell.bridgeWirelessRedstone();
+        }
+    }
+
+    /** Rebind shells once Sable's sublevel container finishes loading (after world join). */
+    public static void onSubLevelContainerReady(Level level, SubLevelContainer container) {
+        if (level.isClientSide() || !(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        scheduleDeferredRebind(5);
+        scheduleDeferredRebind(40);
+        for (ShellBlockBlockEntity shell : new java.util.ArrayList<>(ShellBlockBlockEntity.getActiveShells())) {
+            if (shell.getLevel() == serverLevel && shell.getInstance() != null) {
+                shell.requestRebindAfterLoad();
+            }
+        }
+    }
+
+    public static boolean hasStressBindings(ShellInstance instance) {
+        for (ShellBinding binding : instance.bindings()) {
+            if (binding.type() == ShellEndpointType.STRESS) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean areStressEndpointsReachable(ServerLevel level, ShellInstance instance) {
+        if (resolveSubLevel(level, instance.subLevelId(), instance.origin()) == null) {
+            return false;
+        }
+        for (ShellBinding binding : instance.bindings()) {
+            if (binding.type() != ShellEndpointType.STRESS) {
+                continue;
+            }
+            BlockEntity blockEntity = getInternalBlockEntity(
+                    level, instance.subLevelId(), binding.internalInterfacePos(), instance.origin());
+            if (!(blockEntity instanceof StressInterfaceBlockEntity)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void refreshInternalStressKinetics(ServerLevel level, ShellInstance instance) {
+        if (resolveSubLevel(level, instance.subLevelId(), instance.origin()) == null) {
+            return;
+        }
+        for (ShellBinding binding : instance.bindings()) {
+            if (binding.type() != ShellEndpointType.STRESS) {
+                continue;
+            }
+            BlockEntity blockEntity = getInternalBlockEntity(
+                    level, instance.subLevelId(), binding.internalInterfacePos(), instance.origin());
+            if (blockEntity instanceof StressInterfaceBlockEntity stressInterface) {
+                stressInterface.detachKinetics();
+                stressInterface.attachKinetics();
+            }
         }
     }
 
@@ -172,6 +273,76 @@ public final class ShellManager {
     }
 
     /**
+     * Shell blocks on Sable assembly plots store plot-local coordinates; pose sync and holding-chunk
+     * hints must use the projected global position.
+     */
+    public static BlockPos resolveShellAnchorGlobalPos(ServerLevel level, BlockPos shellPos) {
+        Vec3 global = Sable.HELPER.projectOutOfSubLevel(level, Vec3.atCenterOf(shellPos));
+        return BlockPos.containing(global);
+    }
+
+    private static Vector3d shellAnchorPoseTarget(ServerLevel level, BlockPos shellOrigin) {
+        BlockPos global = resolveShellAnchorGlobalPos(level, shellOrigin);
+        return new Vector3d(global.getX() + 0.5, REMOTE_Y, global.getZ() + 0.5);
+    }
+
+    private static void ensureMainWorldChunkLoaded(ServerLevel level, BlockPos pos) {
+        ChunkPos chunkPos = new ChunkPos(pos);
+        level.getChunkSource().getChunk(chunkPos.x, chunkPos.z, true);
+    }
+
+    /**
+     * Resolves a shell interior sublevel, loading it from Sable holding storage when needed.
+     */
+    public static @Nullable ServerSubLevel resolveSubLevel(
+            ServerLevel level,
+            UUID id,
+            @Nullable BlockPos shellPosHint
+    ) {
+        ServerSubLevel subLevel = getSubLevel(level, id);
+        if (subLevel != null && !subLevel.isRemoved()) {
+            return subLevel;
+        }
+
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (!(container instanceof ServerSubLevelContainer serverContainer)) {
+            return null;
+        }
+
+        SubLevelHoldingChunkMap holdingMap = serverContainer.getHoldingChunkMap();
+        if (holdingMap.getHoldingSubLevel(id) != null) {
+            triggerHoldingSubLevelLoad(level, serverContainer, shellPosHint);
+            return getSubLevel(level, id);
+        }
+
+        if (shellPosHint != null) {
+            BlockPos global = resolveShellAnchorGlobalPos(level, shellPosHint);
+            ensureMainWorldChunkLoaded(level, global);
+            ensureMainWorldChunkLoaded(level, new BlockPos(global.getX(), REMOTE_Y, global.getZ()));
+            holdingMap.processChanges();
+            subLevel = getSubLevel(level, id);
+            if (subLevel != null && !subLevel.isRemoved()) {
+                return subLevel;
+            }
+        }
+
+        return null;
+    }
+
+    private static void triggerHoldingSubLevelLoad(
+            ServerLevel level,
+            ServerSubLevelContainer serverContainer,
+            @Nullable BlockPos shellPosHint
+    ) {
+        if (shellPosHint != null) {
+            BlockPos global = resolveShellAnchorGlobalPos(level, shellPosHint);
+            ensureMainWorldChunkLoaded(level, global);
+            ensureMainWorldChunkLoaded(level, new BlockPos(global.getX(), REMOTE_Y, global.getZ()));
+        }
+        serverContainer.getHoldingChunkMap().processChanges();
+    }
+
+    /**
      * Destroys the embedded/physical sublevel bound to a shell block and unloads it from Sable.
      */
     public static void destroyInstance(ServerLevel level, @Nullable ShellInstance instance) {
@@ -243,11 +414,65 @@ public final class ShellManager {
             UUID subLevelId,
             BlockPos internalRelativePos
     ) {
-        ServerSubLevel subLevel = getSubLevel(level, subLevelId);
+        return getInternalBlockEntity(level, subLevelId, internalRelativePos, null);
+    }
+
+    public static @Nullable BlockEntity getInternalBlockEntity(
+            ServerLevel level,
+            UUID subLevelId,
+            BlockPos internalRelativePos,
+            @Nullable BlockPos shellPosHint
+    ) {
+        ServerSubLevel subLevel = shellPosHint != null
+                ? resolveSubLevel(level, subLevelId, shellPosHint)
+                : getSubLevel(level, subLevelId);
         if (subLevel == null) {
             return null;
         }
         return subLevel.getPlot().getEmbeddedLevelAccessor().getBlockEntity(internalRelativePos);
+    }
+
+    /**
+     * Keeps a shell-bound sublevel's physics pose aligned with the shell block after the block moves
+     * (e.g. on a Simulated physics assembly). Without this, embedded simulation keeps running but
+     * main-world kinetic bridging drifts from the shell's current position.
+     */
+    public static boolean isSubLevelPoseOutOfSync(ServerLevel level, UUID subLevelId, BlockPos shellOrigin) {
+        ServerSubLevel subLevel = resolveSubLevel(level, subLevelId, shellOrigin);
+        if (subLevel == null || subLevel.isRemoved()) {
+            SubLevelContainer container = SubLevelContainer.getContainer(level);
+            if (container instanceof ServerSubLevelContainer serverContainer
+                    && serverContainer.getHoldingChunkMap().getHoldingSubLevel(subLevelId) != null) {
+                return true;
+            }
+            return false;
+        }
+        Vector3d target = shellAnchorPoseTarget(level, shellOrigin);
+        return subLevel.logicalPose().position().distance(target) >= 0.01;
+    }
+
+    public static void syncSubLevelPose(ServerLevel level, UUID subLevelId, BlockPos shellOrigin) {
+        ServerSubLevel subLevel = resolveSubLevel(level, subLevelId, shellOrigin);
+        if (subLevel == null || subLevel.isRemoved()) {
+            return;
+        }
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (!(container instanceof ServerSubLevelContainer serverContainer)) {
+            return;
+        }
+
+        Pose3d pose = subLevel.logicalPose();
+        Vector3d target = shellAnchorPoseTarget(level, shellOrigin);
+        if (pose.position().distance(target) < 0.01) {
+            return;
+        }
+
+        pose.position().set(target);
+        SubLevelPhysicsSystem physicsSystem = serverContainer.physicsSystem();
+        PhysicsPipeline pipeline = physicsSystem.getPipeline();
+        pipeline.teleport(subLevel, pose.position(), pose.orientation());
+        subLevel.updateLastPose();
+        subLevel.updateBoundingBox();
     }
 
     private static ServerSubLevel createSubLevel(ServerLevel level, BlockPos interfaceOrigin) {
@@ -256,8 +481,9 @@ public final class ShellManager {
             throw new IllegalStateException("Sable sublevel container is not ready");
         }
 
+        BlockPos globalOrigin = resolveShellAnchorGlobalPos(level, interfaceOrigin);
         Pose3d pose = new Pose3d();
-        pose.position().set(new Vector3d(interfaceOrigin.getX() + 0.5, REMOTE_Y, interfaceOrigin.getZ() + 0.5));
+        pose.position().set(new Vector3d(globalOrigin.getX() + 0.5, REMOTE_Y, globalOrigin.getZ() + 0.5));
         ServerSubLevel subLevel = (ServerSubLevel) serverContainer.allocateNewSubLevel(pose);
         subLevel.getPlot().newEmptyChunk(subLevel.getPlot().getCenterChunk());
         subLevel.setName("ShellForge Shell");

@@ -8,6 +8,7 @@ import com.shellforge.registry.SFBlockEntities;
 import com.shellforge.shell.ShellInstance;
 import com.shellforge.shell.ShellManager;
 import com.simibubi.create.content.kinetics.base.KineticBlock;
+import dev.ryanhcode.sable.api.block.BlockSubLevelAssemblyListener;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
@@ -30,7 +31,7 @@ import org.jetbrains.annotations.Nullable;
  * Main-world shell block: passthrough parent BE plus per-face stress hubs (see {@link ShellBlockBlockEntity}).
  * Redstone and fluid are bridged in the block entity; Create shaft connectivity is per stress binding face.
  */
-public class ShellBlock extends KineticBlock implements EntityBlock, IConnectionForwardingBlock {
+public class ShellBlock extends KineticBlock implements EntityBlock, IConnectionForwardingBlock, BlockSubLevelAssemblyListener {
     public static final MapCodec<ShellBlock> CODEC = simpleCodec(ShellBlock::new);
 
     public ShellBlock(Properties properties) {
@@ -143,6 +144,20 @@ public class ShellBlock extends KineticBlock implements EntityBlock, IConnection
     public void neighborChanged(BlockState state, Level level, BlockPos pos, Block block, BlockPos fromPos, boolean isMoving) {
         if (level.getBlockEntity(pos) instanceof ShellBlockBlockEntity shellBlock) {
             shellBlock.onNeighborChanged(fromPos);
+        }
+    }
+
+    @Override
+    public void afterMove(
+            ServerLevel originLevel,
+            ServerLevel resultingLevel,
+            BlockState newState,
+            BlockPos oldPos,
+            BlockPos newPos
+    ) {
+        BlockEntity blockEntity = resultingLevel.getBlockEntity(newPos);
+        if (blockEntity instanceof ShellBlockBlockEntity shellBlock) {
+            shellBlock.requestRebindAfterLoad();
         }
     }
 
