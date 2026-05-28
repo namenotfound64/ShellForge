@@ -12,6 +12,8 @@ public record ShellInstance(
         UUID subLevelId,
         BlockPos origin,
         BlockPos structureWorldOrigin,
+        /** Plot-local copy volume (same coords as {@link ShellBlockSnapshot#relativePos()}). */
+        BlockPos structureSize,
         List<ShellBinding> bindings
 ) {
 }

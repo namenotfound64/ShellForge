@@ -4,6 +4,7 @@ import com.shellforge.block.ShellBlock;
 import com.shellforge.block.entity.ShellBlockBlockEntity;
 import com.shellforge.content.FaceExtraBlockPos;
 import com.shellforge.content.IConnectionForwardingBlock;
+import com.shellforge.content.ShellKineticLinkPos;
 import com.simibubi.create.content.kinetics.RotationPropagator;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import net.minecraft.core.BlockPos;
@@ -95,7 +96,10 @@ public abstract class RotationPropagatorMixin {
         }
 
         if (be instanceof ShellBlockBlockEntity.PerFaceStressHub hub) {
-            cir.setReturnValue(List.of(hub.getParentBlockEntity().getBlockPos().relative(hub.getFace())));
+            List<BlockPos> neighbours = new ArrayList<>();
+            neighbours.add(hub.getParentBlockEntity().getBlockPos().relative(hub.getFace()));
+            neighbours.add(new ShellKineticLinkPos(hub.getParentBlockEntity().getBlockPos(), hub.getFace()));
+            cir.setReturnValue(neighbours);
         }
     }
 

@@ -5,9 +5,10 @@ import com.shellforge.content.IExtraFaceKinetics;
 import com.shellforge.registry.SFBlockEntities;
 import com.shellforge.shell.CombinedFluidHandler;
 import com.shellforge.shell.ShellBinding;
+import com.shellforge.shell.ShellDebugSettings;
 import com.shellforge.shell.ShellEndpointType;
 import com.shellforge.shell.ShellInstance;
-import com.shellforge.shell.ShellKineticAngleSync;
+import com.shellforge.content.ShellKineticLinkPos;
 import com.shellforge.shell.ShellManager;
 import com.shellforge.shell.ShellWirelessRedstoneBridge;
 import dev.ryanhcode.sable.Sable;
@@ -16,9 +17,8 @@ import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import com.simibubi.create.content.kinetics.KineticNetwork;
-import com.simibubi.create.content.kinetics.base.GeneratingKineticBlockEntity;
+import com.simibubi.create.content.kinetics.base.IRotate;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
-import com.simibubi.create.content.kinetics.transmission.sequencer.SequencedGearshiftBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -49,8 +49,8 @@ import java.util.WeakHashMap;
  * <ul>
  *   <li><b>Passthrough parent</b> — participates in Create as {@link KineticBlockEntity} with zero stress;
  *       does not expose external neighbours ({@link com.shellforge.mixin.RotationPropagatorMixin}).</li>
- *   <li><b>Per-face hubs</b> — {@link PerFaceStressHub} at {@link FaceExtraBlockPos} bridge stress to sublevel
- *       {@link StressInterfaceBlockEntity}; direction uses Create {@code hasSource()} / {@code isSource()}, not manual modes.</li>
+ *   <li><b>Per-face hubs</b> — {@link PerFaceStressHub} at {@link FaceExtraBlockPos} link to sublevel
+ *       {@link StressInterfaceBlockEntity} via Create custom connections (Swivel bearing model).</li>
  *   <li><b>Redstone / fluid</b> — tick-driven bridging via {@link ShellBinding} list.</li>
  * </ul>
  * See {@code memory/stress_transmission_system.md} for unit conventions (SU vs per-RPM coefficients).
@@ -96,10 +96,14 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     @Override
     public void sable$tick(ServerSubLevel subLevel) {
         tickServerMaintenance();
+        bridgeWirelessRedstone(subLevel, "sublevel-tick");
     }
 
     @Override
     public @Nullable Iterable<@NotNull SubLevel> sable$getConnectionDependencies() {
+        if (ShellDebugSettings.isEnabled()) {
+            return null;
+        }
         if (instance == null || level == null || !(level instanceof ServerLevel serverLevel)) {
             return null;
         }
@@ -125,15 +129,26 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             hub.ensureAttached();
         }
         if (level instanceof ServerLevel serverLevel) {
-            for (PerFaceStressHub hub : stressHubs.values()) {
-                hub.stressTickImport(serverLevel);
-            }
-            for (PerFaceStressHub hub : stressHubs.values()) {
-                hub.stressTickExport(serverLevel);
-            }
+            linkStressInterfaces(serverLevel);
         }
         for (PerFaceStressHub hub : stressHubs.values()) {
             hub.tick();
+        }
+    }
+
+    private void linkStressInterfaces(ServerLevel serverLevel) {
+        if (instance == null) {
+            return;
+        }
+        for (ShellBinding binding : bindings) {
+            if (binding.type() != ShellEndpointType.STRESS) {
+                continue;
+            }
+            BlockEntity internal = ShellManager.getInternalBlockEntity(
+                    serverLevel, instance.subLevelId(), binding.internalInterfacePos(), worldPosition);
+            if (internal instanceof StressInterfaceBlockEntity stressInterface) {
+                stressInterface.setShellLink(worldPosition, binding.shellFace(), instance.subLevelId());
+            }
         }
     }
 
@@ -182,9 +197,11 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         rebuildBindingIndex(instance.bindings());
         ACTIVE_SHELLS.add(this);
         if (level instanceof ServerLevel serverLevel) {
-            ServerSubLevel subLevel = ShellManager.getSubLevel(serverLevel, instance.subLevelId());
+            ServerSubLevel subLevel = ShellManager.resolveSubLevel(
+                    serverLevel, instance.subLevelId(), worldPosition);
             if (subLevel != null) {
-                wirelessRedstoneBridge.refreshInternalLinks(subLevel);
+                BlockPos shellAnchor = ShellManager.resolveShellAnchorGlobalPos(serverLevel, worldPosition);
+                wirelessRedstoneBridge.refreshInternalLinks(subLevel, shellAnchor, instance.structureSize());
             }
         }
         setChanged();
@@ -222,7 +239,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     private void refreshExternalKineticNeighbor(ServerLevel serverLevel, BlockPos neighborPos) {
         SubLevel containing = Sable.HELPER.getContaining(serverLevel, neighborPos);
         Sable.HELPER.runIncludingSubLevels(
-                serverLevel,
+                 serverLevel,
                 neighborPos.getCenter(),
                 true,
                 containing,
@@ -279,8 +296,10 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         }
 
         reinitializeStressHubs();
+        linkStressInterfaces(serverLevel);
         ShellManager.refreshInternalStressKinetics(serverLevel, instance);
-        wirelessRedstoneBridge.refreshInternalLinks(subLevel);
+        wirelessRedstoneBridge.refreshInternalLinks(
+                subLevel, ShellManager.resolveShellAnchorGlobalPos(serverLevel, current), instance.structureSize());
 
         if (!current.equals(instance.origin())) {
             instance = new ShellInstance(
@@ -289,6 +308,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                     instance.subLevelId(),
                     current,
                     instance.structureWorldOrigin(),
+                    instance.structureSize(),
                     instance.bindings()
             );
         }
@@ -381,7 +401,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     }
 
     @Nullable
-    StressInterfaceBlockEntity findStressInterfaceOnFace(ServerLevel serverLevel, Direction face) {
+    public StressInterfaceBlockEntity findStressInterfaceOnFace(ServerLevel serverLevel, Direction face) {
         for (ShellBinding binding : getBindings(face)) {
             if (binding.type() != ShellEndpointType.STRESS) {
                 continue;
@@ -410,23 +430,6 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         return Math.max(1, count);
     }
 
-    /** Hubs actively exporting from the same sublevel network (split remaining capacity among them). */
-    int countExportingHubsOnNetwork(ServerLevel serverLevel, KineticNetwork network) {
-        int count = 0;
-        for (Map.Entry<Direction, PerFaceStressHub> entry : stressHubs.entrySet()) {
-            PerFaceStressHub hub = entry.getValue();
-            if (hub.isImporting()) {
-                continue;
-            }
-            StressInterfaceBlockEntity si = findStressInterfaceOnFace(serverLevel, entry.getKey());
-            if (si != null && si.hasNetwork() && si.getOrCreateNetwork() == network
-                    && Math.abs(si.getSpeed()) > EPSILON) {
-                count++;
-            }
-        }
-        return Math.max(1, count);
-    }
-
     public int getRedstoneOutput(Direction shellFace) {
         return redstoneOutputs.getOrDefault(shellFace, 0);
     }
@@ -443,32 +446,47 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     /**
      * Relays Create wireless redstone across the shell boundary. Called at end of server tick so
      * merged signal levels win over Create's per-world network pass.
+     * <p>
+     * Uses cached internal link lists when available; does not require a live sublevel resolve each tick.
      */
     public void bridgeWirelessRedstone() {
+        bridgeWirelessRedstone(null, "post-tick");
+    }
+
+    /**
+     * @param subLevelHint when called from {@link #sable$tick}, avoids an extra resolve and refreshes from the ticking plot
+     */
+    public void bridgeWirelessRedstone(@Nullable ServerSubLevel subLevelHint) {
+        bridgeWirelessRedstone(subLevelHint, subLevelHint != null ? "sublevel-tick" : "post-tick");
+    }
+
+    private void bridgeWirelessRedstone(@Nullable ServerSubLevel subLevelHint, String source) {
         if (level == null || level.isClientSide || !(level instanceof ServerLevel serverLevel) || instance == null) {
             return;
         }
-        if (!wirelessRedstoneBridge.hasLinks()) {
+        ServerSubLevel subLevel = subLevelHint;
+        if (subLevel == null || subLevel.isRemoved()) {
+            subLevel = ShellManager.resolveSubLevel(
+                    serverLevel, instance.subLevelId(), worldPosition);
+        }
+        BlockPos shellAnchor = ShellManager.resolveShellAnchorGlobalPos(serverLevel, worldPosition);
+        boolean subLevelResolved = subLevel != null && !subLevel.isRemoved();
+        if (subLevelResolved && !"sublevel-tick".equals(source)) {
+            wirelessRedstoneBridge.refreshInternalLinks(subLevel, shellAnchor, instance.structureSize());
+        }
+        boolean hasLinks = wirelessRedstoneBridge.hasLinks();
+        wirelessRedstoneBridge.logEntry(source, serverLevel, shellAnchor, worldPosition, subLevelResolved, hasLinks);
+        if (!hasLinks) {
             return;
         }
-        wirelessRedstoneBridge.bridge(serverLevel, worldPosition, collectRedstoneInterfacePositions());
-    }
-
-    private List<BlockPos> collectRedstoneInterfacePositions() {
-        List<BlockPos> positions = new ArrayList<>();
-        for (ShellBinding binding : bindings) {
-            if (binding.type() == ShellEndpointType.REDSTONE) {
-                positions.add(binding.internalInterfacePos());
-            }
-        }
-        return positions;
+        wirelessRedstoneBridge.bridge(serverLevel, shellAnchor, instance.subLevelId(), source);
     }
 
     // ========== Redstone bridging ==========
 
     private void bridgeRedstone() {
         if (!(level instanceof ServerLevel serverLevel) || instance == null) return;
-        if (ShellManager.getSubLevel(serverLevel, instance.subLevelId()) == null) return;
+        if (ShellManager.resolveSubLevel(serverLevel, instance.subLevelId(), worldPosition) == null) return;
 
         // Resolve outbound levels before inbound so we do not read our own output back as input.
         for (Direction face : Direction.values()) {
@@ -558,7 +576,8 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     /** Block entity inside the bound sublevel at {@link ShellBinding#internalInterfacePos()}. */
     private @Nullable BlockEntity getInternalBlockEntity(ServerLevel serverLevel, ShellBinding binding) {
         if (instance == null) return null;
-        return ShellManager.getInternalBlockEntity(serverLevel, instance.subLevelId(), binding.internalInterfacePos());
+        return ShellManager.getInternalBlockEntity(
+                serverLevel, instance.subLevelId(), binding.internalInterfacePos(), worldPosition);
     }
 
     private BlockPos resolveBindingPos(ServerLevel serverLevel, ShellBinding binding) {
@@ -586,6 +605,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             compound.putUUID("subLevelId", instance.subLevelId());
             compound.putLong("origin", instance.origin().asLong());
             compound.putLong("structureWorldOrigin", instance.structureWorldOrigin().asLong());
+            compound.putLong("structureSize", instance.structureSize().asLong());
             ListTag bindingTags = new ListTag();
             instance.bindings().forEach(binding -> bindingTags.add(binding.save()));
             compound.put("bindings", bindingTags);
@@ -598,16 +618,6 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             outputs.add(tag);
         });
         compound.put("RedstoneOutputs", outputs);
-        if (clientPacket) {
-            ListTag hubAngles = new ListTag();
-            for (Map.Entry<Direction, PerFaceStressHub> entry : stressHubs.entrySet()) {
-                CompoundTag tag = new CompoundTag();
-                tag.putString("face", entry.getKey().getName());
-                tag.putFloat("visualAngle", entry.getValue().bridgedVisualAngle);
-                hubAngles.add(tag);
-            }
-            compound.put("StressHubAngles", hubAngles);
-        }
     }
 
     private BlockPos resolveStructureWorldOrigin(CompoundTag compound, UUID subLevelId) {
@@ -621,6 +631,23 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             return BlockPos.of(compound.getLong("structureWorldOrigin"));
         }
         return BlockPos.ZERO;
+    }
+
+    private static BlockPos resolveStructureSize(CompoundTag compound, List<ShellBinding> bindings) {
+        if (compound.contains("structureSize")) {
+            return BlockPos.of(compound.getLong("structureSize"));
+        }
+        BlockPos max = BlockPos.ZERO;
+        for (ShellBinding binding : bindings) {
+            BlockPos pos = binding.internalInterfacePos();
+            max = new BlockPos(
+                    Math.max(max.getX(), pos.getX()),
+                    Math.max(max.getY(), pos.getY()),
+                    Math.max(max.getZ(), pos.getZ())
+            );
+        }
+        // Legacy saves: pad beyond known interface positions so interior links are included.
+        return new BlockPos(max.getX() + 16, max.getY() + 16, max.getZ() + 16);
     }
 
     @Override
@@ -657,12 +684,20 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                     subLevelId,
                     BlockPos.of(compound.getLong("origin")),
                     structureWorldOrigin,
+                    resolveStructureSize(compound, loadedBindings),
                     List.copyOf(loadedBindings)
             );
             rebuildBindingIndex(loadedBindings);
             lastSyncedShellPos = null;
             pendingAnchorSync = true;
             ACTIVE_SHELLS.add(this);
+            if (level instanceof ServerLevel serverLevel) {
+                ServerSubLevel subLevel = ShellManager.getSubLevel(serverLevel, subLevelId);
+                if (subLevel != null) {
+                    BlockPos shellAnchor = ShellManager.resolveShellAnchorGlobalPos(serverLevel, worldPosition);
+                    wirelessRedstoneBridge.refreshInternalLinks(subLevel, shellAnchor, instance.structureSize());
+                }
+            }
         } else {
             lastSyncedShellPos = null;
             pendingAnchorSync = false;
@@ -676,37 +711,17 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             CompoundTag tag = outputs.getCompound(i);
             redstoneOutputs.put(Direction.byName(tag.getString("face")), tag.getInt("power"));
         }
-        if (clientPacket && compound.contains("StressHubAngles")) {
-            ListTag hubAngles = compound.getList("StressHubAngles", Tag.TAG_COMPOUND);
-            for (int i = 0; i < hubAngles.size(); i++) {
-                CompoundTag tag = hubAngles.getCompound(i);
-                Direction face = Direction.byName(tag.getString("face"));
-                if (face != null && hasStressFace(face)) {
-                    PerFaceStressHub hub = stressHubs.get(face);
-                    if (hub == null) {
-                        hub = (PerFaceStressHub) getStressHub(face);
-                    }
-                    if (hub != null) {
-                        hub.applySyncedVisualAngle(tag.getFloat("visualAngle"));
-                    }
-                }
-            }
-        }
     }
 
     /**
-     * Per-face Create hub at {@link FaceExtraBlockPos}. One hub per stress {@link ShellBinding#shellFace()}.
-     * Direction uses Create {@link #hasSource()} — external drives sublevel, otherwise sublevel drives external.
+     * Per-face Create hub at {@link FaceExtraBlockPos}. Linked to internal
+     * {@link StressInterfaceBlockEntity} via Create custom connections (Swivel bearing model).
      */
-    public static class PerFaceStressHub extends GeneratingKineticBlockEntity {
+    public static class PerFaceStressHub extends KineticBlockEntity {
+        private static final float EPSILON = 1e-4f;
 
         private final ShellBlockBlockEntity parent;
         private final Direction face;
-
-        private float bridgedSpeed;
-        private float bridgedStress;
-        private float bridgedCapacity;
-        private float bridgedVisualAngle;
 
         public PerFaceStressHub(BlockEntityType<?> type, BlockPos pos, BlockState state,
                                 ShellBlockBlockEntity parent, Direction face) {
@@ -719,264 +734,54 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             return face;
         }
 
+        public ShellBlockBlockEntity getShellParent() {
+            return parent;
+        }
+
+        /** External shaft is driving into the shell on this face. */
         boolean isImporting() {
-            return hasSource();
+            return hasExternalSource();
         }
 
-        void stressTickImport(ServerLevel serverLevel) {
-            if (parent.instance == null) {
-                return;
-            }
-            if (ShellManager.resolveSubLevel(serverLevel, parent.instance.subLevelId(), parent.worldPosition) == null) {
-                return;
-            }
-            if (!hasSource()) {
-                return;
-            }
-
-            StressInterfaceBlockEntity si = findStressInterface(serverLevel);
-            if (si == null) {
-                resetState();
-                return;
-            }
-            bridgeExternalToInternal(serverLevel, si);
-        }
-
-        void stressTickExport(ServerLevel serverLevel) {
-            if (parent.instance == null) {
-                return;
-            }
-            if (ShellManager.resolveSubLevel(serverLevel, parent.instance.subLevelId(), parent.worldPosition) == null) {
-                return;
-            }
-
-            StressInterfaceBlockEntity si = findStressInterface(serverLevel);
-            if (si == null) {
-                resetState();
-                return;
-            }
-            if (hasSource() && !shouldPreferInternalExport(si)) {
-                return;
-            }
-            bridgeInternalToExternal(serverLevel, si);
-        }
-
-        /** Internal sublevel is driving; export even if this hub still has an external shaft connection. */
-        private boolean shouldPreferInternalExport(StressInterfaceBlockEntity si) {
-            if (Math.abs(si.getGeneratedSpeed()) > EPSILON) {
+        boolean hasExternalSource() {
+            if (!hasSource() || source == null) {
                 return false;
             }
-            return Math.abs(si.getSpeed()) > EPSILON;
+            return source.equals(parent.getBlockPos().relative(face));
         }
 
         private @Nullable StressInterfaceBlockEntity findStressInterface(ServerLevel serverLevel) {
             return parent.findStressInterfaceOnFace(serverLevel, face);
         }
 
-        private void bridgeExternalToInternal(ServerLevel serverLevel, StressInterfaceBlockEntity si) {
-            float externalSpeed = getSpeed();
-            float speedAbs = Math.abs(externalSpeed);
-
-            if (speedAbs < EPSILON) {
-                si.setExternalSpeed(0, 0);
-                si.setExternalVisualAngle(0);
-                clearImportState();
-                return;
+        private float computeImportStressShare(ServerLevel serverLevel) {
+            StressInterfaceBlockEntity si = findStressInterface(serverLevel);
+            if (si == null || !si.hasNetwork()) {
+                return 0;
             }
-
-            float availableCapacity = Math.max(0, capacity - stress + bridgedStress);
-            float capacityPerRpm = availableCapacity / speedAbs;
-            boolean internalSequence = ShellKineticAngleSync.hasActiveTurnSequence(si);
-            boolean speedUnchanged = !ShellKineticAngleSync.rpmChanged(si.getExternalSpeed(), externalSpeed)
-                    && Math.abs(si.getExternalCapacity() - capacityPerRpm) < EPSILON;
-            if (!internalSequence || !speedUnchanged) {
-                si.setExternalSpeed(externalSpeed, capacityPerRpm);
-            }
-            syncInboundRotation(serverLevel, si, externalSpeed);
-
-            float netStress = 0;
-            KineticNetwork internalNetwork = null;
-            if (si.hasNetwork()) {
-                internalNetwork = si.getOrCreateNetwork();
-                for (float s : internalNetwork.members.values()) {
-                    netStress += s;
-                }
-            }
-
-            int importSharers = internalNetwork != null
-                    ? parent.countImportingHubsOnNetwork(serverLevel, internalNetwork)
-                    : 1;
-
-            float oldStress = bridgedStress;
-            bridgedStress = netStress / importSharers;
-            bridgedSpeed = 0;
-            bridgedCapacity = 0;
-
-            if (Math.abs(oldStress - bridgedStress) > EPSILON && hasNetwork()) {
-                getOrCreateNetwork().updateStressFor(this, bridgedStress);
-            }
-        }
-
-        private void bridgeInternalToExternal(ServerLevel serverLevel, StressInterfaceBlockEntity si) {
-            si.setExternalSpeed(0, 0);
-
-            float internalSpeed = si.getSpeed();
-            float speedAbs = Math.abs(internalSpeed);
-
-            if (speedAbs < EPSILON) {
-                clearExportState();
-                bridgedVisualAngle = 0;
-                sequenceContext = null;
-                return;
-            }
-
-            if (!si.hasNetwork()) {
-                clearExportState();
-                bridgedVisualAngle = 0;
-                sequenceContext = null;
-                return;
-            }
-
             KineticNetwork internalNetwork = si.getOrCreateNetwork();
-
             float netStress = 0;
-            float netCapacity = 0;
             for (float s : internalNetwork.members.values()) {
                 netStress += s;
             }
-            for (float c : internalNetwork.sources.values()) {
-                netCapacity += c;
-            }
-            float remaining = netCapacity - netStress;
-            int exportSharers = parent.countExportingHubsOnNetwork(serverLevel, internalNetwork);
-            float newCapacity = Math.max(0, remaining / exportSharers);
-
-            ShellKineticAngleSync.SpringSequenceState springSequence =
-                    ShellKineticAngleSync.findActiveSpringSequence(si);
-
-            float oldCapacity = bridgedCapacity;
-            float oldSpeed = bridgedSpeed;
-            float exportSpeed = springSequence != null ? springSequence.rpm() : internalSpeed;
-            bridgedSpeed = exportSpeed;
-            bridgedCapacity = newCapacity;
-            bridgedStress = 0;
-            syncOutboundRotation(serverLevel, si, springSequence);
-
-            boolean springTurn = springSequence != null;
-            if (ShellKineticAngleSync.rpmChanged(oldSpeed, bridgedSpeed)) {
-                if (springTurn) {
-                    reActivateSource = true;
-                    if (hasNetwork()) {
-                        getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
-                    }
-                } else {
-                    boolean fromOrToZero = (Math.abs(oldSpeed) < EPSILON) != (Math.abs(bridgedSpeed) < EPSILON);
-                    boolean signFlip = Math.abs(oldSpeed) > EPSILON && Math.abs(bridgedSpeed) > EPSILON
-                            && Math.signum(oldSpeed) != Math.signum(bridgedSpeed);
-                    if (fromOrToZero || signFlip) {
-                        if (hasNetwork()) {
-                            getOrCreateNetwork().remove(this);
-                        }
-                        detachKinetics();
-                        removeSource();
-                        reActivateSource = true;
-                    } else {
-                        reActivateSource = true;
-                        if (hasNetwork()) {
-                            getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
-                        }
-                    }
-                }
-            } else if (Math.abs(oldCapacity - bridgedCapacity) > EPSILON) {
-                if (hasNetwork()) {
-                    getOrCreateNetwork().updateCapacityFor(this, bridgedCapacity);
-                }
-            }
-            setChanged();
+            int importSharers = parent.countImportingHubsOnNetwork(serverLevel, internalNetwork);
+            return netStress / importSharers;
         }
 
-        private void syncInboundRotation(ServerLevel serverLevel, StressInterfaceBlockEntity si, float speed) {
-            // Do not overwrite internal spring/sequencer context with a null external hub context.
-            if (ShellKineticAngleSync.hasActiveTurnSequence(si)) {
-                return;
+        @Override
+        public float calculateStressApplied() {
+            if (!hasExternalSource() || !(level instanceof ServerLevel serverLevel)) {
+                lastStressApplied = 0;
+                return 0;
             }
-            ShellKineticAngleSync.copySequenceContextIfPresent(this, si);
-            bridgedVisualAngle = 0;
-            si.setExternalVisualAngle(0);
-            parent.setChanged();
-            parent.sendData();
-            si.sendData();
-        }
-
-        private void syncOutboundRotation(
-                ServerLevel serverLevel,
-                StressInterfaceBlockEntity si,
-                @Nullable ShellKineticAngleSync.SpringSequenceState springSequence
-        ) {
-            SequencedGearshiftBlockEntity.SequenceContext incoming = springSequence != null
-                    ? springSequence.context()
-                    : ShellKineticAngleSync.findSequenceContextInChain(si);
-            boolean contextChanged = ShellKineticAngleSync.sequenceContextChanged(this.sequenceContext, incoming);
-            this.sequenceContext = incoming;
-            this.bridgedVisualAngle = 0;
-            if (contextChanged) {
-                if (incoming != null) {
-                    ShellKineticAngleSync.refreshDownstreamSequenceContext(this);
-                } else {
-                    ShellKineticAngleSync.clearDownstreamSequenceContext(this);
-                }
-            }
-            parent.setChanged();
-            parent.sendData();
-        }
-
-        void applySyncedVisualAngle(float visualAngle) {
-            bridgedVisualAngle = visualAngle;
-        }
-
-        public float getBridgedVisualAngle() {
-            return bridgedVisualAngle;
-        }
-
-        private void clearImportState() {
-            float oldStress = bridgedStress;
-            bridgedStress = 0;
-            bridgedSpeed = 0;
-            bridgedCapacity = 0;
-            if (Math.abs(oldStress) > EPSILON && hasNetwork()) {
-                getOrCreateNetwork().updateStressFor(this, 0);
-            }
-        }
-
-        private void clearExportState() {
-            if (Math.abs(bridgedSpeed) > EPSILON || Math.abs(bridgedCapacity) > EPSILON) {
-                boolean hadSequence = sequenceContext != null;
-                bridgedSpeed = 0;
-                bridgedCapacity = 0;
-                bridgedStress = 0;
-                bridgedVisualAngle = 0;
-                sequenceContext = null;
-                if (hadSequence) {
-                    ShellKineticAngleSync.clearDownstreamSequenceContext(this);
-                }
-                if (hasNetwork()) {
-                    getOrCreateNetwork().remove(this);
-                }
-                detachKinetics();
-                removeSource();
-                reActivateSource = true;
-                setChanged();
-            }
+            lastStressApplied = computeImportStressShare(serverLevel);
+            return lastStressApplied;
         }
 
         void resetState() {
-            bridgedSpeed = 0;
-            bridgedStress = 0;
-            bridgedCapacity = 0;
-            bridgedVisualAngle = 0;
-            sequenceContext = null;
-            if (hasNetwork())
+            if (hasNetwork()) {
                 getOrCreateNetwork().remove(this);
+            }
             detachKinetics();
             removeSource();
         }
@@ -994,7 +799,9 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
         void ensureAttached() {
             syncLevel();
-            if (level == null || level.isClientSide) return;
+            if (level == null || level.isClientSide) {
+                return;
+            }
             if (!hasNetwork()) {
                 attachKinetics();
             }
@@ -1005,7 +812,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             boolean fromOrToZero = (previousSpeed == 0) != (getSpeed() == 0);
             boolean directionSwap = !fromOrToZero
                     && Math.signum(previousSpeed) != Math.signum(getSpeed());
-            if (directionSwap && hasSource()) {
+            if (directionSwap && hasExternalSource()) {
                 setChanged();
                 return;
             }
@@ -1014,6 +821,9 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
         @Override
         public boolean isCustomConnection(KineticBlockEntity other, BlockState state, BlockState otherState) {
+            if (other instanceof StressInterfaceBlockEntity si) {
+                return si.isLinkedTo(parent.getBlockPos(), face);
+            }
             return other != null && other.getBlockPos().equals(parent.getBlockPos().relative(face));
         }
 
@@ -1026,6 +836,10 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                 boolean connectedViaAxes,
                 boolean connectedViaCogs
         ) {
+            if (target instanceof StressInterfaceBlockEntity si
+                    && si.isLinkedTo(parent.getBlockPos(), face)) {
+                return 1;
+            }
             if (target != null && target.getBlockPos().equals(parent.getBlockPos().relative(face))) {
                 return 1;
             }
@@ -1033,52 +847,10 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         }
 
         @Override
-        public int getRotationAngleOffset(Direction.Axis axis) {
-            if (face.getAxis() != axis || sequenceContext != null) {
-                return 0;
-            }
-            return ShellKineticAngleSync.rotationOffsetForVisualAngle(this, axis, bridgedVisualAngle);
-        }
-
-        @Override
-        protected void copySequenceContextFrom(KineticBlockEntity sourceBE) {
-            SequencedGearshiftBlockEntity.SequenceContext fromSource =
-                    ShellKineticAngleSync.probeSequenceContext(sourceBE);
-            if (fromSource != null) {
-                sequenceContext = fromSource;
-                return;
-            }
-            super.copySequenceContextFrom(sourceBE);
-        }
-
-        @Override
-        protected boolean syncSequenceContext() {
-            return sequenceContext != null;
-        }
-
-        @Override
-        public float getGeneratedSpeed() {
-            return Math.abs(bridgedSpeed) < EPSILON ? 0 : bridgedSpeed;
-        }
-
-        @Override
-        public float calculateAddedStressCapacity() {
-            if (Math.abs(bridgedSpeed) < EPSILON) {
-                lastCapacityProvided = 0;
-                return 0;
-            }
-            lastCapacityProvided = bridgedCapacity;
-            return bridgedCapacity;
-        }
-
-        @Override
-        public float calculateStressApplied() {
-            if (!hasSource()) {
-                lastStressApplied = 0;
-                return 0;
-            }
-            lastStressApplied = bridgedStress;
-            return bridgedStress;
+        public List<BlockPos> addPropagationLocations(IRotate block, BlockState state, List<BlockPos> neighbours) {
+            neighbours.add(parent.getBlockPos().relative(face));
+            neighbours.add(new ShellKineticLinkPos(parent.getBlockPos(), face));
+            return super.addPropagationLocations(block, state, neighbours);
         }
     }
 }

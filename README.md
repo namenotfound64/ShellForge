@@ -180,13 +180,6 @@ src/main/java/com/shellforge/
 ## Known Issues
 
 - Dev runs may load other kinetic mixins (e.g. from Simulated) that compete with ShellForge's `KineticNetworkMixin` — watch the log if stress behaviour differs between dev and production.
-- The behavior of spring/sequenced_gearbox inside the shell may have different behavior with the same structure without shell, problem mainly come from stress_interface's stress deliver.(Now usable, just different behavior)
----
-
-## License
-
-All Rights Reserved (see `gradle.properties`).
-
 ---
 
 ## Credits

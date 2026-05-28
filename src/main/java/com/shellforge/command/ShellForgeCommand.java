@@ -75,6 +75,13 @@ public final class ShellForgeCommand {
 
     private static int setDebug(CommandContext<CommandSourceStack> ctx, boolean enabled) {
         ShellDebugSettings.setEnabled(enabled);
+        if (ctx.getSource().getLevel() instanceof ServerLevel serverLevel) {
+            if (enabled) {
+                ShellManager.projectAllShellsForDebug(serverLevel);
+            } else {
+                ShellManager.restoreAllShellPoses(serverLevel);
+            }
+        }
         ctx.getSource().sendSuccess(() -> Component.translatable(
                 enabled
                         ? "command.shellforge.debug.enabled"

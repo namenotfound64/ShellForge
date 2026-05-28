@@ -47,6 +47,7 @@ public class ShellCoreBlockEntity extends BlockEntity {
         tag.putUUID("subLevelId", instance.subLevelId());
         tag.putLong("origin", instance.origin().asLong());
         tag.putLong("structureWorldOrigin", instance.structureWorldOrigin().asLong());
+        tag.putLong("structureSize", instance.structureSize().asLong());
 
         ListTag bindings = new ListTag();
         instance.bindings().forEach(binding -> bindings.add(binding.save()));
@@ -75,6 +76,9 @@ public class ShellCoreBlockEntity extends BlockEntity {
                 subLevelId,
                 BlockPos.of(tag.getLong("origin")),
                 structureWorldOrigin,
+                tag.contains("structureSize")
+                        ? BlockPos.of(tag.getLong("structureSize"))
+                        : BlockPos.ZERO,
                 List.copyOf(bindings)
         );
     }

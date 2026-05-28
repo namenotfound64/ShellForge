@@ -9,6 +9,8 @@ import com.shellforge.registry.SFBlocks;
 import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
+import dev.ryanhcode.sable.api.physics.force.ForceTotal;
+import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.storage.holding.SubLevelHoldingChunkMap;
@@ -97,6 +99,53 @@ public final class ShellManager {
                 shell.tickServerMaintenance();
             }
             shell.bridgeWirelessRedstone();
+        }
+        if (ShellDebugSettings.isEnabled()) {
+            maintainDebugProjectedShells(server);
+        }
+    }
+
+    /** Debug projection is one-shot; keep projected sublevels from simulating without re-teleporting them. */
+    private static void maintainDebugProjectedShells(MinecraftServer server) {
+        for (ServerLevel level : server.getAllLevels()) {
+            SubLevelContainer container = SubLevelContainer.getContainer(level);
+            if (!(container instanceof ServerSubLevelContainer serverContainer)) {
+                continue;
+            }
+            for (ShellBlockBlockEntity shell : ShellBlockBlockEntity.getActiveShells()) {
+                if (shell.getLevel() != level || shell.getInstance() == null) {
+                    continue;
+                }
+                ServerSubLevel subLevel = resolveSubLevel(
+                        level, shell.getInstance().subLevelId(), shell.getBlockPos());
+                if (subLevel != null && !subLevel.isRemoved()) {
+                    freezeSubLevelPhysics(serverContainer, subLevel);
+                }
+            }
+        }
+    }
+
+    /** One-shot debug projection for every active shell in a level. */
+    public static void projectAllShellsForDebug(ServerLevel level) {
+        for (ShellBlockBlockEntity shell : new java.util.ArrayList<>(ShellBlockBlockEntity.getActiveShells())) {
+            if (shell.getLevel() != level || shell.getInstance() == null) {
+                continue;
+            }
+            ServerSubLevel subLevel = resolveSubLevel(
+                    level, shell.getInstance().subLevelId(), shell.getBlockPos());
+            if (subLevel != null && !subLevel.isRemoved()) {
+                projectSubLevelForDebug(level, subLevel, null, shell.getBlockPos());
+            }
+        }
+    }
+
+    /** Return all shell interiors to their normal remote pose after debug is disabled. */
+    public static void restoreAllShellPoses(ServerLevel level) {
+        for (ShellBlockBlockEntity shell : new java.util.ArrayList<>(ShellBlockBlockEntity.getActiveShells())) {
+            if (shell.getLevel() != level || shell.getInstance() == null) {
+                continue;
+            }
+            syncSubLevelPose(level, shell.getInstance().subLevelId(), shell.getBlockPos());
         }
     }
 
@@ -228,7 +277,7 @@ public final class ShellManager {
         ServerSubLevel subLevel = createSubLevel(level, shellOrigin);
         materializeBlocks(level, subLevel, definition);
         if (ShellDebugSettings.isEnabled()) {
-            projectSubLevelForDebug(level, subLevel, definition, shellOrigin.above(1));
+            projectSubLevelForDebug(level, subLevel, definition, shellOrigin);
         }
         BlockPos structureWorldOrigin = subLevel.getPlot().getCenterBlock();
 
@@ -254,6 +303,7 @@ public final class ShellManager {
                 subLevel.getUniqueId(),
                 shellOrigin,
                 structureWorldOrigin,
+                definition.size(),
                 List.copyOf(bindings)
         );
         if (blockEntity instanceof ShellBlockBlockEntity shellBlock) {
@@ -284,6 +334,93 @@ public final class ShellManager {
     private static Vector3d shellAnchorPoseTarget(ServerLevel level, BlockPos shellOrigin) {
         BlockPos global = resolveShellAnchorGlobalPos(level, shellOrigin);
         return new Vector3d(global.getX() + 0.5, REMOTE_Y, global.getZ() + 0.5);
+    }
+
+    private static Vector3d computeDebugVisualPosition(
+            ServerSubLevel subLevel,
+            @Nullable ShellDefinition definition,
+            BlockPos visualOrigin
+    ) {
+        BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
+        Vector3d visualPosition = new Vector3d(
+                visualOrigin.getX(),
+                visualOrigin.getY(),
+                visualOrigin.getZ()
+        );
+
+        var centerOfMass = subLevel.getMassTracker().getCenterOfMass();
+        if (centerOfMass != null) {
+            visualPosition.add(
+                    centerOfMass.x() - plotAnchor.getX(),
+                    centerOfMass.y() - plotAnchor.getY(),
+                    centerOfMass.z() - plotAnchor.getZ()
+            );
+            return visualPosition;
+        }
+
+        if (definition != null) {
+            BlockPos size = definition.size();
+            subLevel.logicalPose().rotationPoint().set(
+                    plotAnchor.getX() + size.getX() * 0.5,
+                    plotAnchor.getY() + size.getY() * 0.5,
+                    plotAnchor.getZ() + size.getZ() * 0.5
+            );
+            visualPosition.add(size.getX() * 0.5, size.getY() * 0.5, size.getZ() * 0.5);
+            return visualPosition;
+        }
+
+        subLevel.getPlot().updateBoundingBox();
+        var bounds = subLevel.boundingBox();
+        visualPosition.add(
+                (bounds.minX() + bounds.maxX()) * 0.5 - plotAnchor.getX(),
+                (bounds.minY() + bounds.maxY()) * 0.5 - plotAnchor.getY(),
+                (bounds.minZ() + bounds.maxZ()) * 0.5 - plotAnchor.getZ()
+        );
+        return visualPosition;
+    }
+
+    private static void teleportSubLevelPose(
+            ServerLevel level,
+            ServerSubLevel subLevel,
+            Vector3d target
+    ) {
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (!(container instanceof ServerSubLevelContainer serverContainer)) {
+            return;
+        }
+
+        Pose3d pose = subLevel.logicalPose();
+        if (pose.position().distance(target) < 0.01) {
+            return;
+        }
+
+        pose.position().set(target);
+        SubLevelPhysicsSystem physicsSystem = serverContainer.physicsSystem();
+        PhysicsPipeline pipeline = physicsSystem.getPipeline();
+        pipeline.teleport(subLevel, pose.position(), pose.orientation());
+        subLevel.updateLastPose();
+        subLevel.updateBoundingBox();
+    }
+
+    /** Debug projection is visual-only; cancel residual motion so Sable does not fight the teleport. */
+    private static void freezeSubLevelPhysics(ServerSubLevelContainer serverContainer, ServerSubLevel subLevel) {
+        SubLevelPhysicsSystem physicsSystem = serverContainer.physicsSystem();
+        RigidBodyHandle handle = physicsSystem.getPhysicsHandle(subLevel);
+        if (handle == null || !handle.isValid()) {
+            return;
+        }
+
+        Vector3d linearVelocity = new Vector3d();
+        Vector3d angularVelocity = new Vector3d();
+        handle.getAngularVelocity(angularVelocity).negate();
+        handle.getLinearVelocity(linearVelocity).negate();
+        subLevel.logicalPose().orientation().transformInverse(angularVelocity);
+        subLevel.logicalPose().orientation().transformInverse(linearVelocity);
+
+        ForceTotal forceTotal = new ForceTotal();
+        forceTotal.applyLinearImpulse(linearVelocity.mul(subLevel.getMassTracker().getMass()));
+        forceTotal.applyTorqueImpulse(subLevel.getMassTracker().getInertiaTensor().transform(angularVelocity));
+        handle.applyForcesAndReset(forceTotal);
     }
 
     private static void ensureMainWorldChunkLoaded(ServerLevel level, BlockPos pos) {
@@ -438,6 +575,9 @@ public final class ShellManager {
      * main-world kinetic bridging drifts from the shell's current position.
      */
     public static boolean isSubLevelPoseOutOfSync(ServerLevel level, UUID subLevelId, BlockPos shellOrigin) {
+        if (ShellDebugSettings.isEnabled()) {
+            return false;
+        }
         ServerSubLevel subLevel = resolveSubLevel(level, subLevelId, shellOrigin);
         if (subLevel == null || subLevel.isRemoved()) {
             SubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -452,27 +592,30 @@ public final class ShellManager {
     }
 
     public static void syncSubLevelPose(ServerLevel level, UUID subLevelId, BlockPos shellOrigin) {
+        if (ShellDebugSettings.isEnabled()) {
+            return;
+        }
         ServerSubLevel subLevel = resolveSubLevel(level, subLevelId, shellOrigin);
         if (subLevel == null || subLevel.isRemoved()) {
             return;
         }
+        teleportSubLevelPose(level, subLevel, shellAnchorPoseTarget(level, shellOrigin));
+    }
+
+    /** Projects a shell sublevel above its shell block for in-world debug inspection. */
+    public static void projectSubLevelForDebug(
+            ServerLevel level,
+            ServerSubLevel subLevel,
+            ShellDefinition definition,
+            BlockPos shellOrigin
+    ) {
+        BlockPos visualOrigin = resolveShellAnchorGlobalPos(level, shellOrigin).above(1);
+        Vector3d target = computeDebugVisualPosition(subLevel, definition, visualOrigin);
+        teleportSubLevelPose(level, subLevel, target);
         SubLevelContainer container = SubLevelContainer.getContainer(level);
-        if (!(container instanceof ServerSubLevelContainer serverContainer)) {
-            return;
+        if (container instanceof ServerSubLevelContainer serverContainer) {
+            freezeSubLevelPhysics(serverContainer, subLevel);
         }
-
-        Pose3d pose = subLevel.logicalPose();
-        Vector3d target = shellAnchorPoseTarget(level, shellOrigin);
-        if (pose.position().distance(target) < 0.01) {
-            return;
-        }
-
-        pose.position().set(target);
-        SubLevelPhysicsSystem physicsSystem = serverContainer.physicsSystem();
-        PhysicsPipeline pipeline = physicsSystem.getPipeline();
-        pipeline.teleport(subLevel, pose.position(), pose.orientation());
-        subLevel.updateLastPose();
-        subLevel.updateBoundingBox();
     }
 
     private static ServerSubLevel createSubLevel(ServerLevel level, BlockPos interfaceOrigin) {
@@ -488,50 +631,6 @@ public final class ShellManager {
         subLevel.getPlot().newEmptyChunk(subLevel.getPlot().getCenterChunk());
         subLevel.setName("ShellForge Shell");
         return subLevel;
-    }
-
-    private static void projectSubLevelForDebug(
-            ServerLevel level,
-            ServerSubLevel subLevel,
-            ShellDefinition definition,
-            BlockPos visualOrigin
-    ) {
-        SubLevelContainer container = SubLevelContainer.getContainer(level);
-        if (!(container instanceof ServerSubLevelContainer serverContainer)) {
-            return;
-        }
-
-        BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
-        Pose3d pose = subLevel.logicalPose();
-        Vector3d visualPosition = new Vector3d(
-                visualOrigin.getX(),
-                visualOrigin.getY(),
-                visualOrigin.getZ()
-        );
-
-        var centerOfMass = subLevel.getMassTracker().getCenterOfMass();
-        if (centerOfMass != null) {
-            visualPosition.add(
-                    centerOfMass.x() - plotAnchor.getX(),
-                    centerOfMass.y() - plotAnchor.getY(),
-                    centerOfMass.z() - plotAnchor.getZ()
-            );
-        } else {
-            BlockPos size = definition.size();
-            pose.rotationPoint().set(
-                    plotAnchor.getX() + size.getX() * 0.5,
-                    plotAnchor.getY() + size.getY() * 0.5,
-                    plotAnchor.getZ() + size.getZ() * 0.5
-            );
-            visualPosition.add(size.getX() * 0.5, size.getY() * 0.5, size.getZ() * 0.5);
-        }
-
-        pose.position().set(visualPosition);
-        SubLevelPhysicsSystem physicsSystem = serverContainer.physicsSystem();
-        PhysicsPipeline pipeline = physicsSystem.getPipeline();
-        pipeline.teleport(subLevel, pose.position(), pose.orientation());
-        subLevel.updateLastPose();
-        subLevel.updateBoundingBox();
     }
 
     private static void moveSubLevelFarBelow(ServerSubLevel subLevel, BlockPos referencePos) {

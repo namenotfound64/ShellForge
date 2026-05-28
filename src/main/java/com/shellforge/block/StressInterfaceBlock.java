@@ -21,7 +21,7 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import org.jetbrains.annotations.Nullable;
 
-/** Sublevel kinetic endpoint; speed/capacity are injected from {@link com.shellforge.block.entity.ShellBlockBlockEntity.PerFaceStressHub}. */
+/** Sublevel kinetic endpoint linked to a shell face via Create custom connections. */
 public class StressInterfaceBlock extends KineticBlock implements EntityBlock {
     public static final MapCodec<StressInterfaceBlock> CODEC = simpleCodec(StressInterfaceBlock::new);
     public static final DirectionProperty FACING = BlockStateProperties.FACING;
