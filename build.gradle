@@ -184,11 +184,19 @@ dependencies {
         transitive = false
     }
 
-    // Reference pre-built Aeronautics JAR via flatDir
-    localRuntime "dev.eriksonn.aeronautics:aeronautics-neoforge-${project.minecraft_version}:${project.aeronautics_version}-modified"
+    // Reference pre-built Aeronautics / Simulated JARs via flatDir. They come from the sibling
+    // Simulated-Project checkout, so only wire them up once that project has been built; CI
+    // clones this repository alone and still has to resolve testRuntimeClasspath.
+    def aeronauticsJar = file("${rootProject.projectDir}/../Simulated-Project/aeronautics/neoforge/build/libs/aeronautics-neoforge-${project.minecraft_version}-${project.aeronautics_version}-modified.jar")
+    if (aeronauticsJar.isFile()) {
+        localRuntime "dev.eriksonn.aeronautics:aeronautics-neoforge-${project.minecraft_version}:${project.aeronautics_version}-modified"
+    }
 
     // Simulated (needed at runtime for Aeronautics, no longer compiled against)
-    localRuntime "dev.simulated_team.simulated:simulated-neoforge-${project.minecraft_version}:${project.simulated_version}-modified"
+    def simulatedJar = file("${rootProject.projectDir}/../Simulated-Project/simulated/neoforge/build/libs/simulated-neoforge-${project.minecraft_version}-${project.simulated_version}-modified.jar")
+    if (simulatedJar.isFile()) {
+        localRuntime "dev.simulated_team.simulated:simulated-neoforge-${project.minecraft_version}:${project.simulated_version}-modified"
+    }
 
     // Mixin annotations (library provided by NeoForge at runtime)
     compileOnly("org.spongepowered:mixin:0.8.7")
