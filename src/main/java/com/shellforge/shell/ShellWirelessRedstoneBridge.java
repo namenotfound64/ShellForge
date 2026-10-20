@@ -212,14 +212,6 @@ public final class ShellWirelessRedstoneBridge {
         );
     }
 
-    public void bridge(ServerLevel mainLevel, BlockPos shellBlockPos, String source) {
-        bridge(mainLevel, shellBlockPos, null, source);
-    }
-
-    public void bridge(ServerLevel mainLevel, BlockPos shellBlockPos) {
-        bridge(mainLevel, shellBlockPos, null, "unknown");
-    }
-
     /**
      * Max external transmit strength on {@code frequency} from transmitters within Create link range of the shell block.
      * Transmitters on this shell's Sable physical structure use plot-global coords and are always merged; others are

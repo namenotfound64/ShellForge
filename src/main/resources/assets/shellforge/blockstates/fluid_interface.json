@@ -1,5 +1,10 @@
 {
   "variants": {
-    "": { "model": "shellforge:block/fluid_interface" }
+    "facing=north": { "model": "shellforge:block/fluid_interface" },
+    "facing=south": { "model": "shellforge:block/fluid_interface", "y": 180 },
+    "facing=east": { "model": "shellforge:block/fluid_interface", "y": 90 },
+    "facing=west": { "model": "shellforge:block/fluid_interface", "y": 270 },
+    "facing=up": { "model": "shellforge:block/fluid_interface", "x": 270 },
+    "facing=down": { "model": "shellforge:block/fluid_interface", "x": 90 }
   }
 }

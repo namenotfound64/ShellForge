@@ -2,6 +2,7 @@ package com.shellforge.mixin;
 
 import com.shellforge.content.FaceExtraBlockPos;
 import com.shellforge.content.IExtraFaceKinetics;
+import com.shellforge.content.ShellFluidFacePos;
 import com.shellforge.content.ShellKineticLinkPos;
 import com.shellforge.block.entity.ShellBlockBlockEntity;
 import com.shellforge.block.entity.StressInterfaceBlockEntity;
@@ -38,6 +39,16 @@ public abstract class LevelMixin {
             BlockEntity shell = serverLevel.getBlockEntity(new BlockPos(linkPos));
             if (shell instanceof ShellBlockBlockEntity shellBlock) {
                 cir.setReturnValue(shellBlock.findStressInterfaceOnFace(serverLevel, linkPos.face()));
+            } else {
+                cir.setReturnValue(null);
+            }
+            return;
+        }
+
+        if (pos instanceof ShellFluidFacePos fluidFacePos) {
+            BlockEntity shell = ((Level) (Object) this).getBlockEntity(new BlockPos(fluidFacePos));
+            if (shell instanceof ShellBlockBlockEntity shellBlock && shellBlock.hasFluidOnFace(fluidFacePos.face())) {
+                cir.setReturnValue(shellBlock);
             } else {
                 cir.setReturnValue(null);
             }

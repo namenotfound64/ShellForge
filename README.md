@@ -108,7 +108,9 @@ Shell faces read analog power from external neighbors and forward it to internal
 
 ### Fluids
 
-Each fluid-bound face exposes a merged **IFluidHandler** that pipes through to the internal **Fluid Interface** block(s) on that face.(however not implemented yet)
+Each fluid-bound face exposes a merged **IFluidHandler** that delegates to internal **Fluid Interface** block(s). Adjacent Create fluid pipes and pumps use their native transport. Internal pumping also drives direct output into adjacent containers or Create-style open ends, without requiring an exterior pump. Open-end partial buckets are saved with the shell; stopped pumps and blocked destinations retain fluid.
+
+Connected internal fluid pipes can relay a single pump's pressure from one shell face to another. Flow can reverse, and direct exterior endpoints support both pushing and pulling. Disconnected interfaces remain isolated; pressure routes retain a distance budget and suppress feedback.
 
 ### Wireless redstone
 

@@ -3,12 +3,16 @@ package com.shellforge.block.entity;
 import com.shellforge.content.FaceExtraBlockPos;
 import com.shellforge.content.IExtraFaceKinetics;
 import com.shellforge.registry.SFBlockEntities;
-import com.shellforge.shell.CombinedFluidHandler;
+import com.shellforge.shell.ShellFaceFluidHandler;
+import com.shellforge.shell.ShellFluidPressureBridge;
+import com.shellforge.shell.ShellFluidOutlet;
+import com.shellforge.shell.ShellFluidRouting;
 import com.shellforge.shell.ShellBinding;
 import com.shellforge.shell.ShellDebugSettings;
 import com.shellforge.shell.ShellEndpointType;
 import com.shellforge.shell.ShellInstance;
 import com.shellforge.content.ShellKineticLinkPos;
+import com.shellforge.content.ShellFluidFacePos;
 import com.shellforge.shell.ShellManager;
 import com.shellforge.shell.ShellWirelessRedstoneBridge;
 import dev.ryanhcode.sable.Sable;
@@ -30,7 +34,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
-import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -51,7 +54,8 @@ import java.util.WeakHashMap;
  *       does not expose external neighbours ({@link com.shellforge.mixin.RotationPropagatorMixin}).</li>
  *   <li><b>Per-face hubs</b> — {@link PerFaceStressHub} at {@link FaceExtraBlockPos} link to sublevel
  *       {@link StressInterfaceBlockEntity} via Create custom connections (Swivel bearing model).</li>
- *   <li><b>Redstone / fluid</b> — tick-driven bridging via {@link ShellBinding} list.</li>
+ *   <li><b>Redstone</b> — tick-driven bridging via {@link ShellBinding} list.</li>
+ *   <li><b>Fluid</b> — per-face {@link net.neoforged.neoforge.fluids.capability.IFluidHandler} endpoints with pressure-driven exterior outlets.</li>
  * </ul>
  * See {@code memory/stress_transmission_system.md} for unit conventions (SU vs per-RPM coefficients).
  */
@@ -66,6 +70,10 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     private final Map<Direction, List<ShellBinding>> bindingsByFace = new EnumMap<>(Direction.class);
     private final Map<Direction, Integer> redstoneOutputs = new EnumMap<>(Direction.class);
     private final Map<Direction, PerFaceStressHub> stressHubs = new EnumMap<>(Direction.class);
+    private final Map<Direction, ShellFaceFluidHandler> fluidHandlersByFace = new EnumMap<>(Direction.class);
+    private final List<ShellFluidPressureBridge.AppliedPressure> appliedFluidPressure = new ArrayList<>();
+    private final ShellFluidOutlet fluidOutlet = new ShellFluidOutlet();
+    private long lastFluidOutputTick = Long.MIN_VALUE;
     /** Last projected global shell anchor synced to sublevel pose / stress hubs. */
     private @Nullable BlockPos lastSyncedShellPos;
     /** Set on NBT load; cleared after sublevel pose and stress hubs are rebuilt. */
@@ -90,6 +98,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             return;
         }
         tickStressHubs();
+        bridgeFluidPressure();
         bridgeRedstone();
     }
 
@@ -214,6 +223,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
             // consumers that were already placed before setInstance was called would not
             // otherwise learn about the newly available PerFaceStressHub instances.
             refreshStressFaceKinetics();
+            refreshAllFluidFaceNeighbors();
         }
     }
 
@@ -314,6 +324,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         }
 
         lastSyncedShellPos = ShellManager.resolveShellAnchorGlobalPos(serverLevel, current).immutable();
+        refreshAllFluidFaceNeighbors();
         setChanged();
         return true;
     }
@@ -373,6 +384,8 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     }
 
     public void clearInstance() {
+        fluidOutlet.clear();
+        lastFluidOutputTick = Long.MIN_VALUE;
         ACTIVE_SHELLS.remove(this);
         wirelessRedstoneBridge.clear();
         lastSyncedShellPos = null;
@@ -380,11 +393,22 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
         instance = null;
         bindings.clear();
         bindingsByFace.clear();
+        fluidHandlersByFace.clear();
+        clearAppliedFluidPressure();
         redstoneOutputs.clear();
         for (PerFaceStressHub hub : stressHubs.values()) {
             hub.resetState();
         }
         stressHubs.clear();
+        if (level != null && !level.isClientSide) {
+            invalidateCapabilities();
+        }
+    }
+
+    @Override
+    public void invalidate() {
+        clearAppliedFluidPressure();
+        super.invalidate();
     }
 
     public List<ShellBinding> getBindings() {
@@ -555,20 +579,147 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
 
     // ========== Fluid ==========
 
+    /**
+     * Stable fluid endpoint for a shell face (client + server). Create {@code FluidTransportBehaviour}
+     * caches this handler; actual fill/drain delegates into the sublevel on the server.
+     */
     public @Nullable IFluidHandler getFluidHandler(@Nullable Direction side) {
-        if (!(level instanceof ServerLevel serverLevel) || instance == null || side == null) return null;
-        List<IFluidHandler> handlers = new ArrayList<>();
-        for (ShellBinding binding : bindingsByFace.getOrDefault(side, List.of())) {
-            if (binding.type() != ShellEndpointType.FLUID) continue;
-            BlockPos internalPos = resolveBindingPos(serverLevel, binding);
-            IFluidHandler handler = serverLevel.getCapability(
-                    Capabilities.FluidHandler.BLOCK,
-                    internalPos,
-                    side.getOpposite()
-            );
-            if (handler != null) handlers.add(handler);
+        // Capability context, not a synthetic BlockPos, identifies the independent face.
+        return side == null ? null : getFluidFaceHandler(side, side);
+    }
+
+    public @Nullable IFluidHandler getFluidFaceHandler(Direction shellFace, @Nullable Direction side) {
+        if (isRemoved() || level == null || instance == null || !hasFluidOnFace(shellFace)) {
+            return null;
         }
-        return CombinedFluidHandler.merge(handlers);
+        if (side != null && side != shellFace) {
+            return null;
+        }
+        return fluidHandlersByFace.computeIfAbsent(shellFace, face -> new ShellFaceFluidHandler(this, face));
+    }
+
+    public boolean hasFluidOnFace(Direction face) {
+        return bindingsByFace.getOrDefault(face, List.of()).stream()
+                .anyMatch(binding -> binding.type() == ShellEndpointType.FLUID);
+    }
+
+    private void refreshFluidFaceNeighbors(Direction shellFace) {
+        if (level == null || level.isClientSide) {
+            return;
+        }
+        invalidateCapabilities();
+        level.invalidateCapabilities(new ShellFluidFacePos(worldPosition, shellFace));
+        level.updateNeighborsAt(worldPosition, getBlockState().getBlock());
+        BlockPos exteriorNeighbor = worldPosition.relative(shellFace);
+        if (level.isLoaded(exteriorNeighbor)) {
+            BlockState pipeState = level.getBlockState(exteriorNeighbor);
+            if (com.simibubi.create.content.fluids.FluidPropagator.getPipe(level, exteriorNeighbor) != null) {
+                com.simibubi.create.content.fluids.FluidPropagator.propagateChangedPipe(level, exteriorNeighbor, pipeState);
+            }
+        }
+    }
+
+    public void onInternalFluidInterfaceChanged(ServerLevel serverLevel, FluidInterfaceBlockEntity fluidInterface) {
+        ShellInstance currentInstance = instance;
+        if (currentInstance == null) {
+            return;
+        }
+        for (ShellBinding binding : bindings) {
+            if (binding.type() != ShellEndpointType.FLUID) {
+                continue;
+            }
+            BlockEntity internal = ShellManager.getInternalBlockEntity(
+                    serverLevel,
+                    currentInstance.subLevelId(),
+                    binding.internalInterfacePos(),
+                    worldPosition
+            );
+            if (internal == fluidInterface) {
+                refreshFluidFaceNeighbors(binding.shellFace());
+            }
+        }
+    }
+
+    private void bridgeFluidPressure() {
+        if (!(level instanceof ServerLevel serverLevel) || instance == null) {
+            clearAppliedFluidPressure();
+            return;
+        }
+        clearAppliedFluidPressure();
+
+        boolean outputThisTick = lastFluidOutputTick != serverLevel.getGameTime();
+        lastFluidOutputTick = serverLevel.getGameTime();
+        List<ShellFluidRouting.Link> fluidLinks = new ArrayList<>();
+        Map<Direction, List<IFluidHandler>> outputHandlers = new EnumMap<>(Direction.class);
+        for (ShellBinding binding : bindings) {
+            if (binding.type() != ShellEndpointType.FLUID) {
+                continue;
+            }
+            BlockEntity internal = ShellManager.getInternalBlockEntity(
+                    serverLevel,
+                    instance.subLevelId(),
+                    binding.internalInterfacePos(),
+                    worldPosition
+            );
+            if (!(internal instanceof FluidInterfaceBlockEntity fluidInterface) || fluidInterface.isRemoved()) {
+                continue;
+            }
+
+            Direction face = binding.shellFace();
+            Level internalLevel = fluidInterface.getLevel();
+            if (internalLevel == null) {
+                continue;
+            }
+            IFluidHandler handler = fluidInterface.getFluidHandler(face.getOpposite());
+            if (handler == null) continue;
+            fluidLinks.add(new ShellFluidRouting.Link(
+                    new ShellFluidPressureBridge.Endpoint(serverLevel, worldPosition, face),
+                    new ShellFluidPressureBridge.Endpoint(internalLevel, fluidInterface.getBlockPos(), face.getOpposite())));
+            outputHandlers.computeIfAbsent(face, ignored -> new ArrayList<>()).add(handler);
+        }
+        ShellFluidRouting.Result result = ShellFluidRouting.solve(fluidLinks);
+        appliedFluidPressure.addAll(result.applied());
+        if (outputThisTick) outputHandlers.forEach((face, handlers) -> {
+            IFluidHandler source = handlers.size() == 1 ? handlers.getFirst()
+                    : new com.simibubi.create.foundation.fluid.CombinedTankWrapper(handlers.toArray(IFluidHandler[]::new));
+            float pressure = result.outputPressure().getOrDefault(
+                    new ShellFluidPressureBridge.Endpoint(serverLevel, worldPosition, face), 0f);
+            fluidOutlet.exchange(this, face, source, pressure);
+        });
+    }
+
+    private void clearAppliedFluidPressure() {
+        if (appliedFluidPressure.isEmpty()) {
+            return;
+        }
+        for (ShellFluidPressureBridge.AppliedPressure pressure : appliedFluidPressure) {
+            pressure.remove();
+        }
+        appliedFluidPressure.clear();
+    }
+
+    private static void propagateAdjacentCreatePipes(Level level, BlockPos pos) {
+        if (level.isClientSide()) {
+            return;
+        }
+        for (Direction direction : Direction.values()) {
+            BlockPos neighbor = pos.relative(direction);
+            BlockState neighborState = level.getBlockState(neighbor);
+            if (com.simibubi.create.content.fluids.pipes.FluidPipeBlock.isPipe(neighborState)) {
+                com.simibubi.create.content.fluids.FluidPropagator.propagateChangedPipe(level, neighbor, neighborState);
+            }
+        }
+    }
+
+    private void refreshAllFluidFaceNeighbors() {
+        if (level == null || level.isClientSide) {
+            return;
+        }
+        for (Direction face : Direction.values()) {
+            if (hasFluidOnFace(face)) {
+                refreshFluidFaceNeighbors(face);
+            }
+        }
     }
 
     // ========== Helpers ==========
@@ -580,17 +731,16 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
                 serverLevel, instance.subLevelId(), binding.internalInterfacePos(), worldPosition);
     }
 
-    private BlockPos resolveBindingPos(ServerLevel serverLevel, ShellBinding binding) {
-        if (instance == null) return BlockPos.ZERO;
-        return ShellManager.resolveInternalGlobalPos(serverLevel, instance.subLevelId(), binding.internalInterfacePos());
-    }
-
     private void rebuildBindingIndex(List<ShellBinding> newBindings) {
         bindings.clear();
         bindings.addAll(newBindings);
         bindingsByFace.clear();
+        fluidHandlersByFace.clear();
         for (ShellBinding binding : newBindings) {
             bindingsByFace.computeIfAbsent(binding.shellFace(), face -> new ArrayList<>()).add(binding);
+        }
+        if (level != null && !level.isClientSide) {
+            invalidateCapabilities();
         }
     }
 
@@ -599,6 +749,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     @Override
     protected void write(CompoundTag compound, HolderLookup.Provider registries, boolean clientPacket) {
         super.write(compound, registries, clientPacket);
+        compound.put("FluidOutlets", fluidOutlet.write(registries));
         if (instance != null) {
             compound.putUUID("shellId", instance.shellId());
             compound.putUUID("definitionId", instance.definitionId());
@@ -669,6 +820,7 @@ public class ShellBlockBlockEntity extends KineticBlockEntity implements IExtraF
     @Override
     protected void read(CompoundTag compound, HolderLookup.Provider registries, boolean clientPacket) {
         super.read(compound, registries, clientPacket);
+        fluidOutlet.read(compound.getCompound("FluidOutlets"), registries, worldPosition);
         stressHubs.clear();
         if (compound.hasUUID("shellId")) {
             List<ShellBinding> loadedBindings = new ArrayList<>();

@@ -82,6 +82,7 @@ neoForge {
     // These can be tweaked, removed, or duplicated as needed.
     runs {
         client {
+
             client()
 
             // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
@@ -144,9 +145,20 @@ neoForge {
 // "optional", meaning it will not be pulled by dependents of this mod.
 configurations {
     runtimeClasspath.extendsFrom localRuntime
+    testCompileOnly.extendsFrom compileOnly
+    testRuntimeOnly.extendsFrom localRuntime
 }
 
 dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.mockito:mockito-core:5.14.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation("com.simibubi.create:create-${project.minecraft_version}:${project.create_version}") {
+        transitive = false
+    }
+    testImplementation("net.createmod.ponder:ponder-neoforge:${project.ponder_version}+mc${project.minecraft_version}") {
+        transitive = false
+    }
     // Compile against Sable's API without bundling it into the mod jar.
     compileOnly("dev.ryanhcode.sable:sable-common-${project.minecraft_version}:${project.sable_version}")
 
@@ -180,6 +192,17 @@ dependencies {
 
     // Mixin annotations (library provided by NeoForge at runtime)
     compileOnly("org.spongepowered:mixin:0.8.7")
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+}
+
+neoForge {
+    unitTest {
+        enable()
+        testedMod = mods."${mod_id}"
+    }
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.

@@ -1,6 +1,7 @@
 package com.shellforge.shell;
 
 import com.shellforge.block.FaceMarkerBlock;
+import com.shellforge.block.FluidInterfaceBlock;
 import com.shellforge.block.RedstoneInterfaceBlock;
 import com.shellforge.block.StressInterfaceBlock;
 import com.shellforge.block.entity.StressInterfaceBlockEntity;
@@ -686,6 +687,12 @@ public final class ShellManager {
                 accessor.setBlock(
                         localPos,
                         state.setValue(RedstoneInterfaceBlock.FACING, endpoint.shellFace()),
+                        Block.UPDATE_ALL
+                );
+            } else if (endpoint.type() == ShellEndpointType.FLUID && state.is(SFBlocks.FLUID_INTERFACE.get())) {
+                accessor.setBlock(
+                        localPos,
+                        state.setValue(FluidInterfaceBlock.FACING, endpoint.shellFace()),
                         Block.UPDATE_ALL
                 );
             }
